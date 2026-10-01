@@ -487,8 +487,10 @@ impl SharedHidOutput {
     #[cfg(target_os = "windows")]
     pub(crate) fn codex_exchange(&self, data: &[u8; 32]) -> Result<[u8; 32]> {
         match &self.backend {
-            SharedHidOutputBackend::Proxy(proxy) => proxy.upgrade()
-                .context("Macropad disconnected")?.usb_send(data),
+            SharedHidOutputBackend::Proxy(proxy) => proxy
+                .upgrade()
+                .context("Macropad disconnected")?
+                .usb_send(data),
             #[cfg(test)]
             SharedHidOutputBackend::Test(_) => bail!("Use protocol test responder"),
         }
@@ -2385,6 +2387,20 @@ mod tests {
                 "safe pictogram opcode 0x{command:02X} lost its retry budget"
             );
         }
+    }
+
+    #[test]
+    fn codex_task_reply_requires_matching_operation_sequence_and_generation() {
+        let command = [0xD7, 1, 5, 42, 0x10, 0x20, 0x30, 0x40];
+        let mut response = [0u8; MSG_LEN];
+        response[..8].copy_from_slice(&command);
+        assert!(response_matches_command(&command, &response));
+        for field in 1..8 {
+            response[field] ^= 1;
+            assert!(!response_matches_command(&command, &response));
+            response[field] ^= 1;
+        }
+        assert!(!response_matches_command(&command[..7], &response));
     }
 
     #[test]

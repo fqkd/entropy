@@ -2,9 +2,9 @@
 
 mod app;
 pub(crate) mod app_icon;
-mod device;
 #[cfg(target_os = "windows")]
 mod codex_macropad;
+mod device;
 mod diagnostics;
 mod firmware;
 #[cfg(not(target_arch = "wasm32"))]
