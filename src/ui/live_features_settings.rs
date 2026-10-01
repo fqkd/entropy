@@ -12,31 +12,39 @@ impl EntropyApp {
         }
         let ru = matches!(self.app_settings.language, crate::i18n::Language::Russian);
         let metrics = crate::ui_style::ResponsiveMetrics::from_ctx(ui.ctx());
-        ui.scope(|ui| {
-            ui.set_max_width(metrics.settings_content_width());
-            let label = if ru {
-                "Codex: названия локальных задач"
-            } else {
-                "Codex: local task titles"
-            };
-            if ui.checkbox(&mut self.app_settings.codex_macropad_enabled, label).changed() {
-                save_app_settings(&self.app_settings);
-            }
-            ui.label(if ru {
-                "Шесть локальных задач с автоматическими названиями. Оставьте Macropad выбранным и сверните Entropy в трей. Требуется прошивка с поддержкой названий."
-            } else {
-                "Six local tasks with automatic titles. Keep Macropad selected and minimize Entropy to the tray. Requires firmware with task title support."
-            });
-            ui.small(if ru {
-                "Список Entropy может отличаться от списка Micro. В этом режиме NO/YES/SEND/NEW/MIC не действуют; слои и обычные клавиши работают. Ожидание разрешения пока не определяется."
-            } else {
-                "Entropy's list may differ from Micro's. NO/YES/SEND/NEW/MIC are inactive in this mode; layers and normal keys work. Approval waiting cannot yet be detected."
-            });
-            if let Some(bridge) = &self.codex_macropad_bridge {
-                ui.label(bridge.status());
-            }
-        });
-        ui.add_space(metrics.value(12.0));
+        let before = self.app_settings.codex_macropad_enabled;
+        let hint = if ru {
+            "Шесть локальных задач на Macropad. Entropy должна работать в фоне. Зелёная подсветка сохраняется до открытия задачи. В этом режиме NO/YES/SEND/NEW/MIC не действуют; ожидание разрешения пока не определяется."
+        } else {
+            "Six local tasks on Macropad. Keep Entropy running in the background. Completed tasks stay green until opened. NO/YES/SEND/NEW/MIC are inactive; approval waiting cannot yet be detected."
+        };
+        let hint = if let Some(bridge) = &self.codex_macropad_bridge {
+            format!("{hint}\n{}", bridge.status())
+        } else {
+            hint.to_owned()
+        };
+        crate::ui_style::settings_list_row_with_tooltip(
+            ui,
+            metrics.settings_row_content_width(),
+            metrics.settings_row_height(),
+            "Codex",
+            true,
+            Some(&hint),
+            metrics.settings_control_width(),
+            |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    crate::ui_style::settings_switch_sized_stable(
+                        ui,
+                        "live_features_codex_enabled",
+                        &mut self.app_settings.codex_macropad_enabled,
+                        metrics.size(46.0, 24.0),
+                    );
+                });
+            },
+        );
+        if before != self.app_settings.codex_macropad_enabled {
+            save_app_settings(&self.app_settings);
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -207,9 +215,6 @@ impl EntropyApp {
                 );
                 ui.add_space(metrics.value(24.0));
 
-                #[cfg(target_os = "windows")]
-                self.draw_codex_macropad_settings(ui);
-
                 let Some((_, supported_mode)) = supported_path_and_mode else {
                     crate::ui_style::modal_empty_state(
                         ui,
@@ -255,6 +260,8 @@ impl EntropyApp {
                         self.sync_qmk_hid_host_bridges();
                     }
                 }
+                #[cfg(target_os = "windows")]
+                self.draw_codex_macropad_settings(ui);
                 if supported_mode.time {
                     Self::draw_live_feature_row(
                         ui,
@@ -430,5 +437,25 @@ mod tests {
         assert!(!text
             .iter()
             .any(|value| value == "Live Features are not active for this device"));
+        assert!(!text.iter().any(|value| value == "Codex"));
+
+        #[cfg(target_os = "windows")]
+        {
+            let mut macropad = app.device_manager.devices()[0].clone();
+            macropad.vendor_id = 0x303A;
+            macropad.product_id = 0x8360;
+            app.device_manager.replace_devices(vec![macropad]);
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                app.draw_live_features_settings_page(ui, ui.max_rect());
+            });
+            text.clear();
+            for clipped_shape in &output.shapes {
+                collect_text(&clipped_shape.shape, &mut text);
+            }
+            let layout = text.iter().position(|s| s == "Layout sync").unwrap();
+            let codex = text.iter().position(|s| s == "Codex").unwrap();
+            let time = text.iter().position(|s| s == "Time sync").unwrap();
+            assert!(layout < codex && codex < time);
+        }
     }
 }

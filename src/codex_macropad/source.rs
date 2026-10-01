@@ -1,4 +1,7 @@
-use super::{uuid_bytes, Task};
+use super::{
+    attention::{unread_tasks, Attention},
+    uuid_bytes, Task,
+};
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -16,12 +19,14 @@ struct JournalState {
     path: PathBuf,
     bytes: u64,
     phase: u8,
+    completion: Option<String>,
 }
 
 pub(super) struct Source {
     home: PathBuf,
     db: Connection,
     phases: HashMap<String, JournalState>,
+    attention: Attention,
 }
 impl Source {
     pub fn new() -> Result<Self> {
@@ -39,7 +44,13 @@ impl Source {
             home: home.canonicalize()?,
             db,
             phases: HashMap::new(),
+            attention: Attention::new(
+                dirs::config_dir().map(|p| p.join("entropy/codex_task_reads.json")),
+            ),
         })
+    }
+    pub fn opened(&mut self, task: &Task) {
+        self.attention.opened(task);
     }
     pub fn sample(&mut self, previous: &[Task]) -> Result<Vec<Task>> {
         if !desktop_running() {
@@ -57,11 +68,13 @@ impl Source {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut recent = Vec::new();
+        let unread = unread_tasks(&self.home.join(".codex-global-state.json"));
         for (id, title, rollout) in values {
             if uuid_bytes(&id).is_none() {
                 continue;
             }
             let path = PathBuf::from(rollout);
+            let mut completion = None;
             let state = match path.canonicalize() {
                 Ok(p) if p.starts_with(self.home.join("sessions")) => {
                     let mut f = File::open(&p)?;
@@ -71,17 +84,24 @@ impl Source {
                     let mut bytes = Vec::new();
                     f.take(TAIL_BYTES).read_to_end(&mut bytes)?;
                     let previous = self.phases.get(&id).filter(|state| state.path == p);
+                    let observed = event_from_tail(&bytes, start);
                     let phase = next_phase(
-                        phase_from_tail(&bytes, start != 0),
+                        observed.as_ref().map(|event| event.0),
                         previous.map(|state| (state.bytes, state.phase)),
                         metadata.len(),
                     );
+                    if phase == 3 {
+                        completion = observed
+                            .and_then(|event| event.1)
+                            .or_else(|| previous.and_then(|state| state.completion.clone()));
+                    }
                     self.phases.insert(
                         id.clone(),
                         JournalState {
                             path: p,
                             bytes: metadata.len(),
                             phase,
+                            completion: completion.clone(),
                         },
                     );
                     // A journal is not a heartbeat: do not claim "working" indefinitely.
@@ -96,10 +116,18 @@ impl Source {
                 }
                 _ => 1,
             };
-            recent.push(Task { id, title, state });
+            let mut task = Task {
+                id,
+                title,
+                state,
+                completion,
+            };
+            self.attention.apply(&mut task, unread.as_ref());
+            recent.push(task);
         }
         self.phases
             .retain(|id, _| recent.iter().any(|t| &t.id == id));
+        self.attention.retain(&recent);
         Ok(stable_order(previous, recent))
     }
 }
@@ -125,27 +153,40 @@ fn stable_order(previous: &[Task], recent: Vec<Task>) -> Vec<Task> {
     ordered.extend(remaining);
     ordered
 }
-fn phase_from_tail(bytes: &[u8], skip_first: bool) -> Option<u8> {
-    let mut state = None;
-    let mut lines = bytes.split(|b| *b == b'\n');
-    if skip_first {
-        lines.next();
-    }
-    for line in lines {
+fn event_from_tail(bytes: &[u8], start: u64) -> Option<(u8, Option<String>)> {
+    let mut event = None;
+    let mut offset = start;
+    for (index, line) in bytes.split_inclusive(|b| *b == b'\n').enumerate() {
+        let line_offset = offset;
+        offset += line.len() as u64;
+        if start != 0 && index == 0 {
+            continue;
+        }
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
         };
         if v.get("type").and_then(|v| v.as_str()) != Some("event_msg") {
             continue;
         }
-        match v.pointer("/payload/type").and_then(|v| v.as_str()) {
-            Some("task_started") => state = Some(2),
-            Some("task_complete") => state = Some(3),
-            Some("turn_aborted") => state = Some(5),
-            _ => {}
-        }
+        let phase = match v.pointer("/payload/type").and_then(|v| v.as_str()) {
+            Some("task_started") => 2,
+            Some("task_complete") => 3,
+            Some("turn_aborted") => 5,
+            _ => continue,
+        };
+        let completion = (phase == 3).then(|| {
+            format!(
+                "{}:{line_offset}",
+                v.get("timestamp").and_then(|v| v.as_str()).unwrap_or("")
+            )
+        });
+        event = Some((phase, completion));
     }
-    state
+    event
+}
+#[cfg(test)]
+fn phase_from_tail(bytes: &[u8], skip_first: bool) -> Option<u8> {
+    event_from_tail(bytes, u64::from(skip_first)).map(|event| event.0)
 }
 fn desktop_running() -> bool {
     use windows_sys::Win32::{
@@ -185,6 +226,25 @@ fn desktop_running() -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn completion_identity_is_stable_across_tail_windows_and_changes_on_new_result() {
+        let prefix = b"ignored\n";
+        let done = b"{\"timestamp\":\"2026-10-01T12:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
+        let mut journal = prefix.to_vec();
+        journal.extend_from_slice(done);
+        let first = event_from_tail(&journal, 0).unwrap();
+        assert!(first.1.is_some());
+        assert_eq!(event_from_tail(&journal[3..], 3), Some(first.clone()));
+        journal.extend_from_slice(b"{\"type\":\"response_item\"}\n");
+        assert_eq!(event_from_tail(&journal, 0), Some(first.clone()));
+        // Even equal timestamps must not reuse an acknowledgement of an old result.
+        journal.extend_from_slice(done);
+        assert_ne!(event_from_tail(&journal, 0).unwrap().1, first.1);
+        journal.extend_from_slice(
+            b"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        );
+        assert_eq!(event_from_tail(&journal, 0), Some((2, None)));
+    }
+    #[test]
     fn missing_large_append_or_truncation_cannot_keep_a_completed_state() {
         assert_eq!(next_phase(None, Some((10, 3)), TAIL_BYTES + 11), 1);
         assert_eq!(next_phase(None, Some((100, 3)), 50), 1);
@@ -209,6 +269,7 @@ mod tests {
             id: id.into(),
             title: id.into(),
             state: 1,
+            completion: None,
         };
         let ordered = stable_order(&[t("a"), t("b")], vec![t("b"), t("c"), t("a")]);
         assert_eq!(

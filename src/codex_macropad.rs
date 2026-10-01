@@ -10,6 +10,7 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+mod attention;
 mod source;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub(crate) struct Task {
     pub id: String,
     pub title: String,
     pub state: u8,
+    pub completion: Option<String>,
 }
 
 pub(crate) fn uuid_bytes(id: &str) -> Option<[u8; 16]> {
@@ -195,6 +197,16 @@ fn run(output: &SharedHidOutput, stop: &AtomicBool, status: &Mutex<String>) -> R
                         .context("Invalid selected slot")?;
                     if opened != event {
                         open_task(&task.id)?;
+                        source.opened(task);
+                        for row in &mut desired {
+                            if row.id == task.id
+                                && row.completion == task.completion
+                                && row.state == 3
+                            {
+                                row.state = 1;
+                            }
+                        }
+                        next_snapshot = Instant::now();
                         opened = event;
                     }
                     wire.ok(6, generation, &event.to_le_bytes())?;
@@ -211,7 +223,7 @@ fn run(output: &SharedHidOutput, stop: &AtomicBool, status: &Mutex<String>) -> R
                 }
                 next_snapshot = Instant::now() + Duration::from_secs(1);
             }
-            thread::sleep(Duration::from_millis(150));
+            thread::sleep(Duration::from_millis(50));
         }
         Ok(())
     })();
