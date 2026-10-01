@@ -102,6 +102,8 @@ pub(crate) struct AppSettings {
     #[serde(default = "default_layout_sync_enabled")]
     pub(crate) layout_sync_enabled: bool,
     #[serde(default)]
+    pub(crate) codex_macropad_enabled: bool,
+    #[serde(default)]
     pub(crate) typing_trainer: TypingTrainerSettings,
     #[serde(default)]
     pub(crate) typing_trainer_history: Vec<TypingTrainerRunRecord>,
@@ -222,6 +224,7 @@ impl Default for AppSettings {
             text_expander_rule_files: Vec::new(),
             text_expansion_rules: Vec::new(),
             layout_sync_enabled: default_layout_sync_enabled(),
+            codex_macropad_enabled: false,
             typing_trainer: TypingTrainerSettings::default(),
             typing_trainer_history: Vec::new(),
         }
@@ -5188,6 +5191,8 @@ pub struct EntropyApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) qmk_hid_hosts:
         std::collections::HashMap<String, crate::qmk_hid_host::QmkHidHostBridge>,
+    #[cfg(target_os = "windows")]
+    pub(crate) codex_macropad_bridge: Option<crate::codex_macropad::Bridge>,
     /// Current firmware type (mirrors layout.firmware)
     pub(crate) firmware: FirmwareProtocol,
     /// QMK setting ids the connected firmware exposes (from the connect probe).

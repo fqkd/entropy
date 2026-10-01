@@ -1243,6 +1243,19 @@ impl eframe::App for EntropyApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "windows")]
+        {
+            let eligible=self.app_settings.codex_macropad_enabled && !self.headless
+                && self.selected_device.and_then(|i|self.device_manager.devices().get(i))
+                    .is_some_and(|d|d.vendor_id==0x303A && d.product_id==0x8360);
+            let output=eligible.then(||self.shared_hid_output.clone()).flatten();
+            if self.codex_macropad_bridge.as_ref().is_some_and(|b|output.as_ref().is_none_or(|o|!b.matches(o))) {
+                self.codex_macropad_bridge=None;
+            }
+            if self.codex_macropad_bridge.is_none() {
+                if let Some(output)=output {self.codex_macropad_bridge=Some(crate::codex_macropad::Bridge::start(output));}
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             #[cfg(target_os = "windows")]

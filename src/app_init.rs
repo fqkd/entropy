@@ -120,6 +120,8 @@ impl EntropyApp {
             settings_write_generation: 0,
             #[cfg(not(target_arch = "wasm32"))]
             qmk_hid_hosts: std::collections::HashMap::new(),
+            #[cfg(target_os = "windows")]
+            codex_macropad_bridge: None,
             pending_device_connect: None,
             #[cfg(not(target_arch = "wasm32"))]
             headless: false,

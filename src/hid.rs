@@ -482,6 +482,17 @@ enum SharedHidOutputBackend {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl SharedHidOutput {
+    // Reuse the selected device's serialized HID worker. Never open a competing
+    // handle or consume Vial replies from a second reader.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn codex_exchange(&self, data: &[u8; 32]) -> Result<[u8; 32]> {
+        match &self.backend {
+            SharedHidOutputBackend::Proxy(proxy) => proxy.upgrade()
+                .context("Macropad disconnected")?.usb_send(data),
+            #[cfg(test)]
+            SharedHidOutputBackend::Test(_) => bail!("Use protocol test responder"),
+        }
+    }
     pub(crate) fn shares_owner_with(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.host_output, &other.host_output)
     }
@@ -1710,6 +1721,7 @@ fn response_matches_command(command: &[u8], resp: &[u8; MSG_LEN]) -> bool {
     };
 
     match cmd {
+        0xD7 => command.len() >= 8 && resp[..8] == command[..8],
         CMD_VIA_GET_PROTOCOL_VERSION => {
             resp[0] == CMD_VIA_GET_PROTOCOL_VERSION
                 && is_supported_via_protocol(u16::from_be_bytes([resp[1], resp[2]]))

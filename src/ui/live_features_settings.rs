@@ -22,7 +22,9 @@ impl EntropyApp {
             mode.media = true;
         }
 
-        (!mode.is_empty()).then_some((selected.path.clone(), mode))
+        let codex_macropad = cfg!(target_os = "windows")
+            && selected.vendor_id == 0x303A && selected.product_id == 0x8360;
+        (!mode.is_empty() || codex_macropad).then_some((selected.path.clone(), mode))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -165,6 +167,17 @@ impl EntropyApp {
                     .color(app_muted_text(dark)),
                 );
                 ui.add_space(metrics.value(24.0));
+
+                #[cfg(target_os = "windows")]
+                if self.selected_device.and_then(|i|self.device_manager.devices().get(i))
+                    .is_some_and(|d|d.vendor_id==0x303A && d.product_id==0x8360) {
+                    let ru=matches!(lang,crate::i18n::Language::Russian);
+                    let label=if ru {"Codex: названия локальных задач"} else {"Codex: local task titles"};
+                    if ui.checkbox(&mut self.app_settings.codex_macropad_enabled,label).changed() {save_app_settings(&self.app_settings);}
+                    ui.label(if ru {"Entropy ведёт отдельный список из шести локальных задач. Оставьте Macropad выбранным и сверните Entropy в трей. Требуется новая прошивка. Кнопки NO/YES/SEND/NEW/MIC в этом режиме не действуют."} else {"Entropy owns six local tasks. Keep Macropad selected and minimize Entropy to the tray. Requires matching firmware. NO/YES/SEND/NEW/MIC are inactive in this mode."});
+                    if let Some(bridge)=&self.codex_macropad_bridge {ui.label(bridge.status());}
+                    ui.add_space(metrics.value(12.0));
+                }
 
                 let Some((_, supported_mode)) = supported_path_and_mode else {
                     crate::ui_style::modal_empty_state(
