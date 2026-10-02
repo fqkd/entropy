@@ -39,6 +39,30 @@ fn device_selection_needs_scroll(device_count: usize) -> bool {
 }
 
 impl EntropyApp {
+    // Reuse the identity-bound reconnect state machine for the Codex USB pad.
+    // Sleep may retire the HID owner without changing the Windows device path.
+    #[cfg(target_os = "windows")]
+    pub(super) fn maybe_reconnect_codex_macropad(&mut self) {
+        if self.headless
+            || !self.app_settings.codex_macropad_enabled
+            || !matches!(self.connect_state, ConnectState::Idle)
+            || self.hid_write_lifecycle_busy()
+            || !self
+                .selected_device
+                .and_then(|i| self.device_manager.devices().get(i))
+                .is_some_and(|d| d.vendor_id == 0x303A && d.product_id == 0x8360)
+            || !self
+                .shared_hid_output
+                .as_ref()
+                .is_some_and(|o| !o.is_available())
+        {
+            return;
+        }
+        self.begin_bluetooth_reconnect(
+            "Macropad USB connection lost; reopening after disconnect or sleep",
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn bluetooth_reconnect_active(&self) -> bool {
         matches!(
@@ -68,6 +92,7 @@ impl EntropyApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    // The existing reconnect machinery also serves the opt-in USB Macropad.
     pub(super) fn begin_bluetooth_reconnect(&mut self, transport_error: impl Into<String>) -> bool {
         if self.bluetooth_reconnect_active() {
             return false;
@@ -75,7 +100,13 @@ impl EntropyApp {
         let Some(device) = self
             .selected_device
             .and_then(|index| self.device_manager.devices().get(index))
-            .filter(|device| device.is_bluetooth_transport())
+            .filter(|device| {
+                device.is_bluetooth_transport()
+                    || (cfg!(target_os = "windows")
+                        && self.app_settings.codex_macropad_enabled
+                        && device.vendor_id == 0x303A
+                        && device.product_id == 0x8360)
+            })
             .cloned()
         else {
             return false;
@@ -86,7 +117,7 @@ impl EntropyApp {
 
         let transport_error = transport_error.into();
         log::warn!(
-            "Bluetooth HID connection unavailable for {}: {}",
+            "HID connection unavailable for {}: {}",
             device.name,
             transport_error
         );
@@ -100,6 +131,10 @@ impl EntropyApp {
         self.connection_generation = self.connection_generation.wrapping_add(1);
         self.hid_device = None;
         self.shared_hid_output = None;
+        #[cfg(target_os = "windows")]
+        {
+            self.codex_macropad_bridge = None;
+        }
         self.retire_selected_qmk_hid_host_bridges();
         self.pending_device_connect = None;
         self.pending_entlayout_import_path = None;
@@ -372,6 +407,78 @@ impl EntropyApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    fn disconnected_codex_pad() -> EntropyApp {
+        let ctx = egui::Context::default();
+        let creation_context = eframe::CreationContext::_new_kittest(ctx);
+        let mut app = EntropyApp::new(&creation_context);
+        let mut device = bluetooth_device("unchanged-usb-path");
+        device.vendor_id = 0x303A;
+        device.product_id = 0x8360;
+        device.bus_type = "USB".to_owned();
+        app.device_manager.replace_devices(vec![device]);
+        app.selected_device = Some(0);
+        app.layout = Some(test_layout());
+        app.selected_layer = 2;
+        app.app_settings.codex_macropad_enabled = true;
+        // The UI still has its HID object, but the child connection has died.
+        app.hid_device = Some(crate::hid::HidDevice::test_device().0);
+        app.shared_hid_output = Some(crate::hid::SharedHidOutput::test_expired_proxy_owner());
+        app.connect_state = ConnectState::Idle;
+        app
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn codex_macropad_reconnects_retired_owner_at_unchanged_path() {
+        let mut app = disconnected_codex_pad();
+        let identity = app.device_manager.devices()[0].stable_identity();
+        let generation = app.connection_generation;
+        app.maybe_reconnect_codex_macropad();
+        let ConnectState::Reconnecting(state) = &app.connect_state else {
+            panic!("Retired USB owner must enter automatic reconnect");
+        };
+        assert_eq!(state.identity, identity);
+        assert_eq!(app.connection_generation, generation.wrapping_add(1));
+        assert!(app.layout.is_some());
+        assert_eq!(app.selected_layer, 2);
+        assert!(app.hid_device.is_none());
+        assert!(app.shared_hid_output.is_none());
+        app.maybe_reconnect_codex_macropad();
+        assert_eq!(app.connection_generation, generation.wrapping_add(1));
+        // A wake-up scan may see only another keyboard while USB is returning.
+        app.apply_device_scan_result(vec![bluetooth_device("other-keyboard")]);
+        let ConnectState::Reconnecting(state) = &app.connect_state else {
+            panic!("Keep waiting for the same Macropad");
+        };
+        assert_eq!(state.identity, identity);
+        assert!(app.selected_device.is_none());
+        assert!(app.layout.is_some());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn codex_macropad_does_not_reconnect_healthy_disabled_or_unselected_device() {
+        let mut app = disconnected_codex_pad();
+        app.app_settings.codex_macropad_enabled = false;
+        app.maybe_reconnect_codex_macropad();
+        assert!(matches!(app.connect_state, ConnectState::Idle));
+        assert!(!app.begin_bluetooth_reconnect("disabled USB integration"));
+        app.app_settings.codex_macropad_enabled = true;
+        app.connect_state = ConnectState::SelectingDevice;
+        app.maybe_reconnect_codex_macropad();
+        assert!(matches!(app.connect_state, ConnectState::SelectingDevice));
+        app.connect_state = ConnectState::Idle;
+        app.shared_hid_output = app.hid_device.as_ref().unwrap().shared_output();
+        app.maybe_reconnect_codex_macropad();
+        assert!(matches!(app.connect_state, ConnectState::Idle));
+        app.shared_hid_output = Some(crate::hid::SharedHidOutput::test_expired_proxy_owner());
+        app.device_manager
+            .replace_devices(vec![bluetooth_device("another-keyboard")]);
+        app.maybe_reconnect_codex_macropad();
+        assert!(matches!(app.connect_state, ConnectState::Idle));
+    }
 
     fn test_layout() -> KeyboardLayout {
         KeyboardLayout {
