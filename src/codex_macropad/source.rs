@@ -130,7 +130,7 @@ impl Source {
         self.phases
             .retain(|id, _| recent.iter().any(|t| &t.id == id));
         self.attention.retain(&recent);
-        Ok(stable_order(previous, recent))
+        Ok(new_tasks_first(previous, recent))
     }
 }
 fn next_phase(observed: Option<u8>, previous: Option<(u64, u8)>, size: u64) -> u8 {
@@ -144,7 +144,7 @@ fn next_phase(observed: Option<u8>, previous: Option<(u64, u8)>, size: u64) -> u
         })
         .unwrap_or(1)
 }
-fn stable_order(previous: &[Task], recent: Vec<Task>) -> Vec<Task> {
+fn new_tasks_first(previous: &[Task], recent: Vec<Task>) -> Vec<Task> {
     let mut remaining = recent;
     let mut ordered = Vec::new();
     for old in previous {
@@ -152,8 +152,11 @@ fn stable_order(previous: &[Task], recent: Vec<Task>) -> Vec<Task> {
             ordered.push(remaining.remove(i));
         }
     }
-    ordered.extend(remaining);
-    ordered
+    // Newly visible tasks lead in recency order. Existing rows keep their
+    // relative order even when their status, title or recency changes.
+    // Firmware defers committing changed row IDs while the user navigates.
+    remaining.extend(ordered);
+    remaining
 }
 fn event_from_tail(bytes: &[u8], start: u64) -> Option<(u8, Option<String>)> {
     let mut event = None;
@@ -348,11 +351,52 @@ mod tests {
             state: 1,
             completion: None,
         };
-        let ordered = stable_order(&[t("a"), t("b")], vec![t("b"), t("c"), t("a")]);
+        let ordered = new_tasks_first(&[t("a"), t("b")], vec![t("b"), t("c"), t("a")]);
         assert_eq!(
             ordered.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-            vec!["a", "b", "c"]
+            vec!["c", "a", "b"]
         );
+    }
+    #[test]
+    fn new_tasks_lead_a_full_list_without_shuffling_existing_rows_on_updates() {
+        let t = |id: &str| Task {
+            id: id.into(),
+            title: id.into(),
+            state: 1,
+            completion: None,
+        };
+        let initial: Vec<_> = ["a", "b", "c", "d", "e", "f"].into_iter().map(t).collect();
+        let first = new_tasks_first(
+            &initial,
+            ["new2", "new1", "d", "b", "a", "c"]
+                .into_iter()
+                .map(t)
+                .collect(),
+        );
+        let ids = |tasks: &[Task]| tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&first), ["new2", "new1", "a", "b", "c", "d"]);
+        let mut changed = t("c");
+        changed.title = "Renamed".into();
+        changed.state = 3;
+        changed.completion = Some("result".into());
+        let next = new_tasks_first(
+            &first,
+            vec![
+                changed.clone(),
+                t("b"),
+                t("new1"),
+                t("a"),
+                t("d"),
+                t("new2"),
+            ],
+        );
+        assert_eq!(ids(&next), ids(&first));
+        assert_eq!(next[4], changed);
+        // Disappearing/archived entries free space; no stale copy remains.
+        let after_removal = new_tasks_first(&next, vec![t("new3"), t("new2"), t("a")]);
+        assert_eq!(ids(&after_removal), ["new3", "new2", "a"]);
+        // A fresh session follows the source's recency order.
+        assert_eq!(ids(&new_tasks_first(&[], vec![t("b"), t("a")])), ["b", "a"]);
     }
     #[test]
     fn cancellation_and_restart_take_precedence_over_completion() {
