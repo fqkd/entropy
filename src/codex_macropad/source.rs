@@ -1,7 +1,4 @@
-use super::{
-    attention::{unread_tasks, Attention},
-    uuid_bytes, Task,
-};
+use super::{attention::Attention, uuid_bytes, Task};
 use anyhow::{bail, Context, Result};
 use rusqlite::{Connection, OpenFlags};
 use std::{
@@ -56,6 +53,9 @@ impl Source {
         if !desktop_running() {
             bail!("Open Codex / Откройте Codex");
         }
+        self.sample_tasks(previous)
+    }
+    fn sample_tasks(&mut self, previous: &[Task]) -> Result<Vec<Task>> {
         // Explicit schema contract. Fail closed if a later app changes it.
         let mut statement = self.db.prepare(TASK_QUERY)?;
         let values = statement
@@ -68,7 +68,9 @@ impl Source {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let mut recent = Vec::new();
-        let unread = unread_tasks(&self.home.join(".codex-global-state.json"));
+        // Do not open Codex's global state (including its backup). Even shared
+        // readers can block Windows atomic replacement and make message sends
+        // fail with EPERM. Only successful keypad opens acknowledge a result.
         for (id, title, rollout) in values {
             if uuid_bytes(&id).is_none() {
                 continue;
@@ -122,7 +124,7 @@ impl Source {
                 state,
                 completion,
             };
-            self.attention.apply(&mut task, unread.as_ref());
+            self.attention.apply(&mut task);
             recent.push(task);
         }
         self.phases
@@ -225,6 +227,81 @@ fn desktop_running() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const TEST_ID: &str = "12345678-1234-1234-1234-123456789abc";
+    fn fixture() -> (tempfile::TempDir, Source) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(home.join("sessions")).unwrap();
+        let journal = home.join("sessions/task.jsonl");
+        std::fs::write(&journal, b"{\"timestamp\":\"one\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n").unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE threads (id TEXT, name TEXT, title TEXT, rollout_path TEXT, archived INT, agent_path TEXT, source TEXT, recency_at_ms INT, updated_at_ms INT, updated_at INT);").unwrap();
+        db.execute(
+            "INSERT INTO threads VALUES (?1,'Test task','Original',?2,0,NULL,'vscode',10,10,0)",
+            [TEST_ID, journal.to_str().unwrap()],
+        )
+        .unwrap();
+        let source = Source {
+            home,
+            db,
+            phases: HashMap::new(),
+            attention: Attention::new(None),
+        };
+        (dir, source)
+    }
+    fn app_state(unread: bool) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "electron-thread-read-state-v1": {"version": 1, "unreadByIdentity": {
+                "test-account": {"local:test-host": if unread {vec![TEST_ID]} else {vec![]}}
+            }},
+            "padding": "x".repeat(64 * 1024)
+        }))
+        .unwrap()
+    }
+    #[test]
+    fn only_keypad_open_acknowledges_result_even_if_app_read_flags_change() {
+        let (_dir, mut source) = fixture();
+        let state = source.home.join(".codex-global-state.json");
+        std::fs::write(&state, app_state(true)).unwrap();
+        let first = source.sample_tasks(&[]).unwrap();
+        assert_eq!(first[0].state, 3);
+        std::fs::write(&state, app_state(false)).unwrap();
+        let second = source.sample_tasks(&first).unwrap();
+        assert_eq!(second[0].state, 3);
+        assert_eq!(second[0].title, "Test task");
+        source.opened(&second[0]);
+        assert_eq!(source.sample_tasks(&second).unwrap()[0].state, 1);
+    }
+    #[test]
+    fn windows_app_can_atomically_replace_state_while_tasks_are_polled() {
+        use std::sync::{Arc, Barrier};
+        let (_dir, mut source) = fixture();
+        let target = source.home.join(".codex-global-state.json");
+        let next = source.home.join(".codex-global-state.json.tmp-test");
+        let data = app_state(true);
+        std::fs::write(&target, &data).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer = std::thread::spawn(move || {
+            writer_barrier.wait();
+            (0..128)
+                .map(|_| std::fs::write(&next, &data).and_then(|_| std::fs::rename(&next, &target)))
+                .collect::<Vec<_>>()
+        });
+        barrier.wait();
+        let samples = (0..128)
+            .map(|_| source.sample_tasks(&[]))
+            .collect::<Vec<_>>();
+        let writes = writer.join().unwrap();
+        for write in writes {
+            write.expect("App state replacement must not be blocked by Entropy");
+        }
+        for sample in samples {
+            let tasks = sample.unwrap();
+            assert_eq!(tasks[0].id, TEST_ID);
+            assert_eq!(tasks[0].state, 3);
+        }
+    }
     #[test]
     fn completion_identity_is_stable_across_tail_windows_and_changes_on_new_result() {
         let prefix = b"ignored\n";

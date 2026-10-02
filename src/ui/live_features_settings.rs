@@ -14,9 +14,9 @@ impl EntropyApp {
         let metrics = crate::ui_style::ResponsiveMetrics::from_ctx(ui.ctx());
         let before = self.app_settings.codex_macropad_enabled;
         let hint = if ru {
-            "Шесть локальных задач на Macropad. Entropy должна работать в фоне. Зелёная подсветка сохраняется до открытия задачи. В этом режиме NO/YES/SEND/NEW/MIC не действуют; ожидание разрешения пока не определяется."
+            "Шесть локальных задач на Macropad. Entropy должна работать в фоне. Зелёная подсветка снимается при открытии задачи кнопкой или нажатием энкодера макропада. Открытие мышью её не снимает. В этом режиме NO/YES/SEND/NEW/MIC не действуют; ожидание разрешения пока не определяется."
         } else {
-            "Six local tasks on Macropad. Keep Entropy running in the background. Completed tasks stay green until opened. NO/YES/SEND/NEW/MIC are inactive; approval waiting cannot yet be detected."
+            "Six local tasks on Macropad. Keep Entropy running in the background. Green completion clears when opened with a Macropad key or encoder press; opening with the mouse does not clear it. NO/YES/SEND/NEW/MIC are inactive; approval waiting cannot yet be detected."
         };
         let hint = if let Some(bridge) = &self.codex_macropad_bridge {
             format!("{hint}\n{}", bridge.status())

@@ -2,10 +2,10 @@
 use super::Task;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -15,7 +15,6 @@ struct SavedReads {
 }
 struct Pending {
     token: String,
-    seen_unread: bool,
 }
 pub(super) struct Attention {
     path: Option<PathBuf>,
@@ -27,7 +26,13 @@ impl Attention {
         let saved = path
             .as_ref()
             .and_then(|p| File::open(p).ok())
-            .and_then(|f| serde_json::from_reader::<_, SavedReads>(f.take(256 * 1024)).ok())
+            .and_then(|f| {
+                // Read only Entropy's receipt file; close it before parsing.
+                let mut bytes = Vec::new();
+                f.take(256 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+                (bytes.len() <= 256 * 1024).then_some(bytes)
+            })
+            .and_then(|bytes| serde_json::from_slice::<SavedReads>(&bytes).ok())
             .filter(|v| v.version == 1)
             .unwrap_or_default();
         Self {
@@ -50,7 +55,7 @@ impl Attention {
         }
         self.save();
     }
-    pub fn apply(&mut self, task: &mut Task, unread: Option<&HashSet<String>>) {
+    pub fn apply(&mut self, task: &mut Task) {
         if task.state == 2 || task.state == 5 {
             self.pending.remove(&task.id); // A new run supersedes the previous result.
             return;
@@ -66,25 +71,14 @@ impl Attention {
                         task.id.clone(),
                         Pending {
                             token: token.clone(),
-                            seen_unread: false,
                         },
                     );
                 }
             }
         }
-        if let Some(pending) = self.pending.get_mut(&task.id) {
+        if let Some(pending) = self.pending.get(&task.id) {
             task.state = 3; // Hold completion even when a journal sample has no status.
             task.completion = Some(pending.token.clone());
-            if let Some(unread) = unread {
-                if unread.contains(&task.id) {
-                    pending.seen_unread = true;
-                } else if pending.seen_unread {
-                    // Require a read transition: missing or delayed app flags alone
-                    // must never extinguish a newly completed notification.
-                    self.opened(task);
-                    task.state = 1;
-                }
-            }
         }
     }
     pub fn retain(&mut self, tasks: &[Task]) {
@@ -119,47 +113,6 @@ impl Attention {
     }
 }
 
-// Read the app's persisted flags, never change them. With multiple identities,
-// don't guess which account owns a missing flag; keypad opens still acknowledge.
-#[derive(Deserialize)]
-struct GlobalState {
-    #[serde(rename = "electron-thread-read-state-v1")]
-    reads: ReadState,
-}
-#[derive(Deserialize)]
-struct ReadState {
-    version: u8,
-    #[serde(rename = "unreadByIdentity")]
-    identities: HashMap<String, HashMap<String, Vec<String>>>,
-}
-fn parse_unread(reader: impl Read) -> Option<HashSet<String>> {
-    let state: GlobalState = serde_json::from_reader(reader).ok()?;
-    if state.reads.version != 1 || state.reads.identities.len() != 1 {
-        return None;
-    }
-    let hosts = state.reads.identities.into_values().next()?;
-    let mut found = false;
-    let mut ids = HashSet::new();
-    for (host, threads) in hosts {
-        if host.starts_with("local:") || host.starts_with("durable:") {
-            found = true;
-            ids.extend(
-                threads
-                    .into_iter()
-                    .filter(|id| super::uuid_bytes(id).is_some()),
-            );
-        }
-    }
-    found.then_some(ids)
-}
-pub(super) fn unread_tasks(path: &Path) -> Option<HashSet<String>> {
-    let f = File::open(path).ok()?;
-    if f.metadata().ok()?.len() > 16 * 1024 * 1024 {
-        return None;
-    }
-    parse_unread(f.take(16 * 1024 * 1024))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,38 +128,17 @@ mod tests {
     fn completion_stays_lit_until_open_and_does_not_return_on_poll() {
         let mut a = Attention::new(None);
         let mut t = done("one");
-        a.apply(&mut t, None);
+        a.apply(&mut t);
         t.state = 1;
         t.completion = None;
-        a.apply(&mut t, None);
+        a.apply(&mut t);
         assert_eq!(t.state, 3);
         a.opened(&t);
         t = done("one");
-        a.apply(&mut t, None);
+        a.apply(&mut t);
         assert_eq!(t.state, 1);
         t = done("two");
-        a.apply(&mut t, None);
-        assert_eq!(t.state, 3);
-    }
-    #[test]
-    fn only_an_observed_app_read_transition_clears_completion() {
-        let mut a = Attention::new(None);
-        let empty = HashSet::new();
-        let mut t = done("one");
-        a.apply(&mut t, Some(&empty));
-        assert_eq!(t.state, 3);
-        let unread = HashSet::from(["task".into()]);
-        a.apply(&mut t, Some(&unread));
-        a.apply(&mut t, None);
-        assert_eq!(t.state, 3);
-        a.apply(&mut t, Some(&empty));
-        assert_eq!(t.state, 1);
-        t = done("two");
-        a.apply(&mut t, Some(&empty));
-        assert_eq!(t.state, 3);
-        for _ in 0..1000 {
-            a.apply(&mut t, Some(&empty));
-        }
+        a.apply(&mut t);
         assert_eq!(t.state, 3);
     }
     #[test]
@@ -214,16 +146,16 @@ mod tests {
         let mut a = Attention::new(None);
         let old = done("one");
         let mut new = done("two");
-        a.apply(&mut new, None);
+        a.apply(&mut new);
         a.opened(&old);
-        a.apply(&mut new, None);
+        a.apply(&mut new);
         assert_eq!(new.state, 3);
         new.state = 2;
         new.completion = None;
-        a.apply(&mut new, None);
+        a.apply(&mut new);
         assert_eq!(new.state, 2);
         new.state = 1;
-        a.apply(&mut new, None);
+        a.apply(&mut new);
         assert_eq!(new.state, 1);
     }
     #[test]
@@ -233,15 +165,25 @@ mod tests {
         Attention::new(Some(p.clone())).opened(&done("one"));
         let mut a = Attention::new(Some(p));
         let mut t = done("one");
-        a.apply(&mut t, None);
+        a.apply(&mut t);
         assert_eq!(t.state, 1);
     }
     #[test]
-    fn unsupported_or_ambiguous_read_state_is_not_treated_as_read() {
-        assert!(parse_unread(b"{}".as_slice()).is_none());
-        assert!(parse_unread(br#"{"electron-thread-read-state-v1":{"version":2,"unreadByIdentity":{"a":{"local:x":[]}}}}"#.as_slice()).is_none());
-        assert!(parse_unread(br#"{"electron-thread-read-state-v1":{"version":1,"unreadByIdentity":{"a":{},"b":{}}}}"#.as_slice()).is_none());
-        let value=br#"{"electron-thread-read-state-v1":{"version":1,"unreadByIdentity":{"a":{"local:x":["12345678-1234-1234-1234-123456789abc"],"durable:y":[]}}}}"#;
-        assert_eq!(parse_unread(value.as_slice()).unwrap().len(), 1);
+    fn invalid_or_oversized_receipts_do_not_acknowledge_results() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("reads.json");
+        let mut oversized = br#"{"version":1,"opened":{"task":"one"}}"#.to_vec();
+        oversized.resize(256 * 1024 + 1, b' ');
+        for data in [
+            b"broken".to_vec(),
+            br#"{"version":2,"opened":{"task":"one"}}"#.to_vec(),
+            oversized,
+        ] {
+            std::fs::write(&p, data).unwrap();
+            let mut a = Attention::new(Some(p.clone()));
+            let mut t = done("one");
+            a.apply(&mut t);
+            assert_eq!(t.state, 3);
+        }
     }
 }
