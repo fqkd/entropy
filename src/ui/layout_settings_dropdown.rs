@@ -686,6 +686,28 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_macropad_exposes_display_menu_and_automatic_clock_data() {
+        let mut device = crate::device::Device {
+            name: "Macropad".into(),
+            vendor_id: 0x303A,
+            product_id: 0x8360,
+            manufacturer: "Ergohaven".into(),
+            serial_number: "hybrid".into(),
+            bus_type: "Usb".into(),
+            path: "vial".into(),
+            instance_token: "vial".into(),
+            firmware: crate::firmware::FirmwareProtocol::Vial,
+        };
+        assert!(display_menu_available(
+            EntropyApp::device_uses_automatic_display_host_data(&device)
+        ));
+        device.manufacturer = "Work Louder".into();
+        assert!(!display_menu_available(
+            EntropyApp::device_uses_automatic_display_host_data(&device)
+        ));
+    }
+
+    #[test]
     fn known_display_device_keeps_display_menu_visible_during_capability_reload() {
         assert!(display_menu_available(true));
         assert!(!display_menu_available(false));

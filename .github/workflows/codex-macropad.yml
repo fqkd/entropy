@@ -14,6 +14,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Test local task source and transport
         run: |
+          cargo test --locked --bin entropy device::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --bin entropy layout_settings_dropdown::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --bin entropy codex_macropad
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --bin entropy live_features_settings_ui::tests -- --test-threads=1

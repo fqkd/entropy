@@ -357,6 +357,16 @@ impl Device {
             && ERGOHAVEN_DISPLAY_MACROPAD_PRODUCT_IDS.contains(&self.product_id)
     }
 
+    /// The Vial endpoint of our hybrid firmware shares Codex Micro's USB IDs.
+    /// IDs alone must not enable flash/display commands on a real Micro.
+    pub(crate) fn is_codex_display_macropad(&self) -> bool {
+        self.firmware == FirmwareProtocol::Vial
+            && self.vendor_id == 0x303A
+            && self.product_id == 0x8360
+            && self.manufacturer.eq_ignore_ascii_case("Ergohaven")
+            && self.name.eq_ignore_ascii_case("Macropad")
+    }
+
     pub(crate) fn is_m4cr0pad_v3(&self) -> bool {
         self.vendor_id == ERGOHAVEN_VENDOR_ID && self.product_id == M4CR0PAD_V3_PRODUCT_ID
     }
@@ -640,6 +650,28 @@ mod tests {
             instance_token: path.to_owned(),
             firmware: FirmwareProtocol::Vial,
         }
+    }
+
+    #[test]
+    fn codex_display_identity_requires_ergohaven_vial_endpoint() {
+        let mut device = test_device("Usb", "macropad-vial");
+        device.vendor_id = 0x303A;
+        device.product_id = 0x8360;
+        device.name = "Macropad".into();
+        device.manufacturer = "Ergohaven".into();
+        assert!(device.is_codex_display_macropad());
+        device.normalize_discovered_identity();
+        assert_eq!(device.name, "Macropad");
+        // Do not silently enroll in the stock automatic application profiles.
+        assert!(!device.is_ergohaven_display_macropad());
+        device.manufacturer = "Work Louder".into();
+        assert!(!device.is_codex_display_macropad());
+        device.manufacturer = "Ergohaven".into();
+        device.name = "Codex Micro".into();
+        assert!(!device.is_codex_display_macropad());
+        device.name = "Macropad".into();
+        device.product_id = 0x0042;
+        assert!(!device.is_codex_display_macropad());
     }
 
     #[test]

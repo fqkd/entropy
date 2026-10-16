@@ -1525,6 +1525,18 @@ impl EntropyApp {
                 }
                 ui.add_space(18.0);
 
+                #[cfg(not(target_arch = "wasm32"))]
+                if mode == 1 && self.selected_device
+                    .and_then(|index| self.device_manager.devices().get(index))
+                    .is_some_and(crate::device::Device::is_codex_display_macropad)
+                {
+                    ui.label(if lang == crate::i18n::Language::Russian {
+                        "На слое Codex сохраняется список задач. Цвет интерфейса, фон и яркость применяются к нему; стиль кнопок и пиктограммы — к обычным слоям."
+                    } else {
+                        "The Codex layer keeps its task list. Interface color, background and brightness apply to it; button shapes and pictograms apply to ordinary layers."
+                    });
+                    ui.add_space(8.0);
+                }
                 let metrics = crate::ui_style::ResponsiveMetrics::from_ctx(ui.ctx());
                 let row_count = display_settings_row_count(&self.display_settings, mode);
                 let body = ui.available_rect_before_wrap();

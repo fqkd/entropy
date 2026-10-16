@@ -483,7 +483,8 @@ impl EntropyApp {
         let name = device.name.to_ascii_lowercase();
         let ergohaven_macropad_display = device.is_ergohaven_display_macropad();
 
-        ergohaven_macropad_display || name.contains("m4cr0pad v2") || name.contains("m4cr0pad v3")
+        ergohaven_macropad_display || device.is_codex_display_macropad()
+            || name.contains("m4cr0pad v2") || name.contains("m4cr0pad v3")
     }
 
     fn settings_title_words(title: &str) -> Vec<String> {
