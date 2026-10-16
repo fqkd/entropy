@@ -293,10 +293,14 @@ pub(crate) struct TestHidRecorder {
     responses: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<[u8; MSG_LEN]>>>,
     responder: std::sync::Arc<std::sync::Mutex<Option<TestHidResponder>>>,
     output_connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    output_hook: std::sync::Arc<std::sync::Mutex<Option<Box<dyn FnMut(&[u8]) + Send>>>>,
 }
 
 #[cfg(test)]
 impl TestHidRecorder {
+    pub(crate) fn on_output(&self, hook: impl FnMut(&[u8]) + Send + 'static) {
+        *self.output_hook.lock().unwrap() = Some(Box::new(hook));
+    }
     // Per scripted physical owner; survives moving the HID device into its worker.
     pub(crate) fn set_pictogram_backup_directory(&self, directory: PathBuf) {
         *self.pictogram_backup_directory.lock().unwrap() = Some(directory);
@@ -640,6 +644,7 @@ impl HidDevice {
             requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             responses: Default::default(),
             responder: Default::default(),
+            output_hook: Default::default(),
             output_connected: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let device = Self {
@@ -1061,6 +1066,9 @@ fn ensure_output_report_len(data: &[u8]) -> Result<()> {
 #[cfg(test)]
 fn record_test_output_report(recorder: &TestHidRecorder, data: &[u8]) -> Result<()> {
     recorder.ensure_output_connected()?;
+    if let Some(hook) = recorder.output_hook.lock().unwrap().as_mut() {
+        hook(data);
+    }
     let mut report = [0; MSG_LEN];
     report[..data.len()].copy_from_slice(data);
     recorder
@@ -1120,6 +1128,17 @@ fn is_keymap_read_request(data: &[u8]) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn is_application_layout_capability_probe(data: &[u8]) -> bool {
+    data.starts_with(&[
+        0xE6,
+        crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+        0xA5,
+        0,
+        0,
+    ])
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn is_optional_dynamic_entry_count_request(data: &[u8]) -> bool {
     data.starts_with(&[
         CMD_VIA_VIAL_PREFIX,
@@ -1151,6 +1170,7 @@ fn usb_send_max_attempts(transport: HidTransport, data: &[u8]) -> usize {
         || is_keymap_read_request(data)
         || crate::rmk_native::is_rmk_native_capabilities_request(data)
         || is_optional_dynamic_entry_count_request(data)
+        || is_application_layout_capability_probe(data)
         || data.first().is_some_and(|command| {
             // Pictogram BEGIN/DATA/COMMIT are not idempotent: replay can
             // restart storage, fail sequence checks, or reject a committed upload.
@@ -1757,6 +1777,11 @@ fn response_matches_command(command: &[u8], resp: &[u8; MSG_LEN]) -> bool {
         | CMD_VIA_LIGHTING_SAVE
         | CMD_VIA_MACRO_SET_BUFFER => resp[0] == cmd,
         CMD_VIA_VIAL_PREFIX => response_matches_vial_command(command, resp),
+        0xE6 if is_application_layout_capability_probe(command) => {
+            resp[0] == 0xE6
+                && resp[1] == crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION
+                && resp[2] == 0x5A
+        }
         // Keep reading for this command within the original deadline when a
         // delayed response from another pictogram command arrives. Never resend.
         0xC0..=0xCB => resp[0] == cmd,
@@ -2310,6 +2335,27 @@ mod tests {
     }
 
     #[test]
+    fn application_layout_probe_is_optional_and_requires_live_response() {
+        let request = [
+            0xE6,
+            crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+            0xA5,
+            0,
+            0,
+        ];
+        assert_eq!(usb_send_max_attempts(HidTransport::Usb, &request), 1);
+        let mut response = [0u8; MSG_LEN];
+        response[..3].copy_from_slice(&[
+            0xE6,
+            crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+            0x5A,
+        ]);
+        assert!(response_matches_command(&request, &response));
+        response[2] = 0;
+        assert!(!response_matches_command(&request, &response));
+    }
+
+    #[test]
     fn keymap_reads_fail_fast_for_compatibility_fallback() {
         assert_eq!(
             usb_send_max_attempts(HidTransport::Usb, &[CMD_VIA_KEYMAP_GET_BUFFER, 0, 0, 28]),
@@ -2718,6 +2764,63 @@ mod tests {
         );
         assert_eq!(session.refused_requests().len(), writes.len() + 1);
         assert!(session.failed_reads().is_empty());
+    }
+
+    #[test]
+    fn read_only_pictogram_and_capability_preparation_keeps_writes_denied() {
+        let session = ReadOnlyHidSession::default();
+        let (hid, recorder) = HidDevice::test_read_only_device(session.clone());
+        for read in [
+            vec![0xc0],
+            vec![0xc1, 0, 0],
+            vec![0xca, 0, 0],
+            vec![0xcb, 0, 0, 0, 0],
+            vec![
+                0xe6,
+                crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+                0xa5,
+                0,
+                0,
+            ],
+        ] {
+            assert!(hid.usb_send(&read).is_ok(), "{read:02x?}");
+        }
+        let before = recorder.requests().len();
+        for write in [
+            vec![0xc2],
+            vec![0xc3],
+            vec![0xc4],
+            vec![0xc6],
+            vec![0xc7],
+            vec![0xc8],
+            vec![0xc9],
+            vec![
+                0xe6,
+                crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+                0xa5,
+                1,
+                0,
+            ],
+            vec![
+                0xe6,
+                crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+                0xa5,
+                0,
+                1,
+            ],
+            vec![
+                0xe6,
+                crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION,
+                0xa5,
+                0,
+                0,
+                1,
+            ],
+            vec![0xe5, 0],
+        ] {
+            assert!(hid.usb_send(&write).is_err(), "{write:02x?}");
+        }
+        assert_eq!(recorder.requests().len(), before);
     }
 
     #[test]

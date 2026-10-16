@@ -646,7 +646,34 @@ impl EntropyApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    fn retry_failed_full_layout_loads(&mut self, action: DeferredFullLayoutAction) {
+        // Retry only on an explicit user request. Failed loads are not eligible
+        // for the normal scheduler, and must not make a new request wait forever.
+        for layer in 0..self.layer_count.max(1) {
+            if matches!(
+                self.deferred_device_load.layer_status(layer),
+                DeferredLoadStatus::Failed(_)
+            ) {
+                self.deferred_device_load
+                    .set_layer_status(layer, DeferredLoadStatus::NotLoaded);
+            }
+        }
+        if !matches!(action, DeferredFullLayoutAction::OpenImageExport) {
+            for section in ENTLAYOUT_EXPORT_SECTIONS {
+                if matches!(
+                    self.deferred_device_load.section_status(section),
+                    DeferredLoadStatus::Failed(_)
+                ) {
+                    self.deferred_device_load
+                        .set_section_status(section, DeferredLoadStatus::NotLoaded);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn request_entlayout_import_after_full_load(&mut self) {
+        self.retry_failed_full_layout_loads(DeferredFullLayoutAction::ImportEntlayout);
         if self.deferred_full_layout_action_ready(DeferredFullLayoutAction::ImportEntlayout) {
             self.import_entlayout_dialog();
         } else {
@@ -661,6 +688,7 @@ impl EntropyApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn request_entlayout_export_after_full_load(&mut self) {
+        self.retry_failed_full_layout_loads(DeferredFullLayoutAction::ExportEntlayout);
         if self.deferred_full_layout_action_ready(DeferredFullLayoutAction::ExportEntlayout) {
             self.export_entlayout_dialog();
         } else {
@@ -675,6 +703,7 @@ impl EntropyApp {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn request_image_export_after_full_load(&mut self) {
+        self.retry_failed_full_layout_loads(DeferredFullLayoutAction::OpenImageExport);
         if self.deferred_full_layout_action_ready(DeferredFullLayoutAction::OpenImageExport) {
             self.open_layout_image_export_page();
         } else {
@@ -692,6 +721,37 @@ impl EntropyApp {
         let Some(action) = self.deferred_full_layout_action else {
             return;
         };
+        let failed_layer = (0..self.layer_count.max(1)).find_map(|layer| {
+            match self.deferred_device_load.layer_status(layer) {
+                DeferredLoadStatus::Failed(error) => Some(format!("Layer{layer}: {error}")),
+                _ => None,
+            }
+        });
+        let failed = failed_layer.or_else(|| {
+            if matches!(action, DeferredFullLayoutAction::OpenImageExport) {
+                return None;
+            }
+            ENTLAYOUT_EXPORT_SECTIONS.into_iter().find_map(|section| {
+                match self.deferred_device_load.section_status(section) {
+                    DeferredLoadStatus::Failed(error) => Some(format!("{section:?}: {error}")),
+                    _ => None,
+                }
+            })
+        });
+        if let Some(error) = failed {
+            self.deferred_full_layout_action = None;
+            self.status_msg = crate::i18n::tr_catalog_format(
+                self.app_settings.language,
+                if matches!(action, DeferredFullLayoutAction::ImportEntlayout) {
+                    "status_messages.import_failed"
+                } else {
+                    "entlayout.export_failed"
+                },
+                &[("error", &error)],
+            );
+            ctx.request_repaint();
+            return;
+        }
         if !self.deferred_full_layout_action_ready(action) {
             return;
         }
@@ -946,7 +1006,10 @@ impl EntropyApp {
                             encoder_count,
                         ),
                         self.hide_modular_encoders_by_default(layout),
+                        self.encoder_only_module_settings(layout),
                     );
+                    let layout = layout.clone();
+                    self.migrate_fixed_encoder_visibility_to_layout(&layout);
                 }
                 self.deferred_device_load
                     .set_section_status(DeferredLoadSection::Modules, DeferredLoadStatus::Loaded);
@@ -1481,6 +1544,66 @@ mod tests {
         let mut context = context();
         context.supported_qmk_settings = std::sync::Arc::new(vec![2, 4, 21]);
         context
+    }
+
+    #[test]
+    fn failed_full_layout_requests_report_and_retry_only_failed_dependencies() {
+        for action in [
+            DeferredFullLayoutAction::ImportEntlayout,
+            DeferredFullLayoutAction::ExportEntlayout,
+            DeferredFullLayoutAction::OpenImageExport,
+        ] {
+            let mut app = EntropyApp::new_inert_for_test();
+            app.layer_count = 4;
+            app.deferred_device_load = DeferredDeviceLoadState::staged(context());
+            app.deferred_device_load
+                .set_layer_status(1, DeferredLoadStatus::Failed("read failed".into()));
+            app.deferred_device_load
+                .set_layer_status(2, DeferredLoadStatus::Loading);
+            app.deferred_device_load.set_section_status(
+                DeferredLoadSection::Macros,
+                DeferredLoadStatus::Failed("macro read failed".into()),
+            );
+            app.deferred_full_layout_action = Some(action);
+            let ctx = egui::Context::default();
+            app.finish_deferred_full_layout_action(&ctx);
+            assert!(!app.deferred_full_layout_action_pending());
+            assert!(app.status_msg.contains("read failed"));
+            assert!(app.pending_file_dialog.is_none());
+            match action {
+                DeferredFullLayoutAction::ImportEntlayout => {
+                    app.request_entlayout_import_after_full_load()
+                }
+                DeferredFullLayoutAction::ExportEntlayout => {
+                    app.request_entlayout_export_after_full_load()
+                }
+                DeferredFullLayoutAction::OpenImageExport => {
+                    app.request_image_export_after_full_load()
+                }
+            }
+            assert_eq!(app.deferred_full_layout_action, Some(action));
+            assert_eq!(
+                app.deferred_device_load.layer_status(1),
+                DeferredLoadStatus::NotLoaded
+            );
+            assert_eq!(
+                app.deferred_device_load.layer_status(2),
+                DeferredLoadStatus::Loading
+            );
+            if matches!(action, DeferredFullLayoutAction::OpenImageExport) {
+                assert!(matches!(
+                    app.deferred_device_load
+                        .section_status(DeferredLoadSection::Macros),
+                    DeferredLoadStatus::Failed(_)
+                ));
+            } else {
+                assert_eq!(
+                    app.deferred_device_load
+                        .section_status(DeferredLoadSection::Macros),
+                    DeferredLoadStatus::NotLoaded
+                );
+            }
+        }
     }
 
     #[test]

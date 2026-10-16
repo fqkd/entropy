@@ -29,6 +29,21 @@ impl EntropyApp {
             self.app_settings.language,
             "status_messages.device_unlock_cancelled",
         ));
+        // A protected feature selected from the menus must not become visible
+        // merely because the preflight overlay was dismissed. Keep its selection
+        // for a later explicit click, but return to the keyboard canvas now.
+        if matches!(
+            self.main_menu_tab,
+            MainMenuTab::Advanced | MainMenuTab::Settings
+        ) && matches!(
+            self.settings_tab,
+            SettingsTab::MatrixTester
+                | SettingsTab::Macros
+                | SettingsTab::TapDance
+                | SettingsTab::AutoShift
+        ) {
+            self.main_menu_tab = MainMenuTab::Keyboard;
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -222,7 +237,13 @@ impl EntropyApp {
                     );
 
                     let center_x = screen.center().x;
-                    let top_y = screen.min.y + 40.0;
+                    // Center the preflight title, text, and buttons as a group.
+                    // Leave the active unlock layout in its existing position.
+                    let top_y = if preflight {
+                        screen.center().y - 65.0
+                    } else {
+                        screen.min.y + 40.0
+                    };
 
                     // Title
                     ui.painter().text(
@@ -237,18 +258,8 @@ impl EntropyApp {
                     );
 
                     if preflight {
-                        ui.painter().text(
-                            egui::pos2(center_x, top_y + 38.0),
-                            egui::Align2::CENTER_CENTER,
-                            crate::i18n::tr_catalog(
-                                self.app_settings.language,
-                                "unlock.start_hint",
-                            ),
-                            FontId::proportional(16.0),
-                            subtitle_color,
-                        );
                         let warning_rect = egui::Rect::from_center_size(
-                            egui::pos2(center_x, top_y + 90.0),
+                            egui::pos2(center_x, top_y + 65.0),
                             egui::vec2(screen.width().min(560.0), 54.0),
                         );
                         crate::ui_style::allocate_ui_at_rect(ui, warning_rect, |ui| {
@@ -263,7 +274,7 @@ impl EntropyApp {
                             );
                         });
                         let buttons_rect = egui::Rect::from_center_size(
-                            egui::pos2(center_x, top_y + 160.0),
+                            egui::pos2(center_x, top_y + 130.0),
                             egui::vec2(260.0, 36.0),
                         );
                         crate::ui_style::allocate_ui_at_rect(ui, buttons_rect, |ui| {
@@ -436,7 +447,7 @@ mod tests {
     fn click_preflight_button(app: &mut EntropyApp, ctx: &egui::Context, start: bool) {
         frame(app, ctx, Vec::new());
         // The preflight row is centered in the 1100px test viewport.
-        let pos = egui::pos2(if start { 600.0 } else { 480.0 }, 200.0);
+        let pos = egui::pos2(if start { 600.0 } else { 480.0 }, 465.0);
         frame(app, ctx, vec![egui::Event::PointerMoved(pos)]);
         for pressed in [true, false] {
             frame(
@@ -505,6 +516,51 @@ mod tests {
         assert!(!app.unlock_open);
         assert!(app.vial_hid_task.is_none());
         assert!(recorder.requests().is_empty());
+    }
+
+    #[test]
+    fn cancelling_locked_feature_navigation_returns_to_keyboard() {
+        for tab in [
+            SettingsTab::Macros,
+            SettingsTab::TapDance,
+            SettingsTab::AutoShift,
+            SettingsTab::MatrixTester,
+        ] {
+            let ctx = egui::Context::default();
+            let mut app = EntropyApp::new_inert_for_test();
+            let (hid, recorder) = crate::hid::HidDevice::test_device();
+            app.hid_device = Some(hid);
+            app.firmware = FirmwareProtocol::Vial;
+            app.vial_unlocked = Some(false);
+            app.settings_tab = tab;
+            app.main_menu_tab = if tab == SettingsTab::MatrixTester {
+                MainMenuTab::Settings
+            } else {
+                MainMenuTab::Advanced
+            };
+            app.unlock_open = true;
+
+            click_preflight_button(&mut app, &ctx, false);
+            assert!(!app.unlock_open);
+            assert!(app.main_menu_tab == MainMenuTab::Keyboard);
+            assert!(app.settings_tab == tab);
+            assert_eq!(app.vial_unlocked, Some(false));
+            assert!(recorder.requests().is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelling_direct_unlock_does_not_change_unrelated_page() {
+        let mut app = EntropyApp::new_inert_for_test();
+        app.firmware = FirmwareProtocol::Vial;
+        app.main_menu_tab = MainMenuTab::Settings;
+        app.settings_tab = SettingsTab::AboutDevice;
+        app.unlock_open = true;
+
+        app.dismiss_vial_unlock_preflight();
+        assert!(!app.unlock_open);
+        assert!(app.main_menu_tab == MainMenuTab::Settings);
+        assert!(app.settings_tab == SettingsTab::AboutDevice);
     }
 
     #[test]

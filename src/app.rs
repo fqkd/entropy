@@ -29,7 +29,14 @@ pub(crate) use pictograms::*;
 
 #[path = "app_state.rs"]
 mod app_state;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "pictogram_origin.rs"]
+mod pictogram_origin;
 pub use app_state::*;
+#[cfg(not(target_arch = "wasm32"))]
+use pictogram_origin::is_known_migrated_stock_pictogram;
+#[cfg(test)]
+use pictogram_origin::LEGACY_NAME_LOOKUPS;
 
 #[path = "app_init.rs"]
 mod app_init;
@@ -44,6 +51,9 @@ use app_update::*;
 mod app_repaint;
 #[cfg(not(target_arch = "wasm32"))]
 use app_repaint::*;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "application_layout_portable.rs"]
+mod application_layout_portable;
 #[path = "entlayout.rs"]
 mod entlayout;
 #[cfg(not(target_arch = "wasm32"))]
@@ -73,6 +83,10 @@ mod alt_repeat_settings_ui;
 mod app_lifecycle;
 #[path = "ui/app_settings.rs"]
 mod app_settings_ui;
+#[path = "ui/application_layout_runtime.rs"]
+mod application_layout_runtime;
+#[path = "ui/application_layouts_settings.rs"]
+mod application_layouts_settings_ui;
 #[path = "ui/auto_shift_settings.rs"]
 mod auto_shift_settings_ui;
 #[path = "ui/bluetooth_settings.rs"]
@@ -131,6 +145,9 @@ mod layout_options_settings_ui;
 #[path = "ui/layout_shared.rs"]
 mod layout_shared;
 use layout_shared::*;
+#[path = "ui/top_menu_icon_catalog.rs"]
+mod top_menu_icon_catalog;
+use top_menu_icon_catalog::*;
 #[path = "ui/top_dropdown.rs"]
 mod top_dropdown;
 use top_dropdown::*;
@@ -142,6 +159,8 @@ mod layout_chrome;
 mod layout_device_dropdown;
 #[path = "ui/layout_dropdowns.rs"]
 mod layout_dropdowns;
+#[path = "ui/layout_element_visibility.rs"]
+mod layout_element_visibility;
 #[path = "ui/layout_hints.rs"]
 mod layout_hints;
 #[path = "ui/layout_image_export.rs"]

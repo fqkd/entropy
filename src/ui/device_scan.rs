@@ -316,6 +316,68 @@ mod tests {
     }
 
     #[test]
+    fn successful_scan_clears_unplugged_selected_usb_workspace_before_device_switch() {
+        let ctx = egui::Context::default();
+        let mut app = EntropyApp::new_inert_for_test();
+        let macropad = scan_test_device("Macropad");
+        let k04 = scan_test_device("K04");
+        app.device_manager
+            .replace_devices(vec![macropad.clone(), k04.clone()]);
+        app.selected_device = Some(0);
+        app.current_device_name = macropad.name.clone();
+        app.layout = Some(KeyboardLayout {
+            name: macropad.name.clone(),
+            rows: 0,
+            cols: 0,
+            keys: Vec::new(),
+            encoders: Vec::new(),
+            layers: vec![Vec::new()],
+            encoder_layers: vec![Vec::new()],
+            layer_names: vec!["Base".to_owned()],
+            custom_keycodes: Vec::new(),
+            layout_options: Vec::new(),
+            live_features: Default::default(),
+            supports_rgb: false,
+            lighting_mode: None,
+            firmware: FirmwareProtocol::Vial,
+        });
+        let (hid, _recorder) = crate::hid::HidDevice::test_device();
+        app.hid_device = Some(hid);
+        app.device_display_names
+            .insert(macropad.display_name_cache_key(), macropad.name.clone());
+        let old_generation = app.connection_generation;
+        let (launch_tx, requests) = mpsc::channel();
+        app.test_connect_requests = Some(launch_tx);
+        let (scan_tx, scan_rx) = mpsc::channel();
+        scan_tx.send(Ok(vec![k04.clone()])).unwrap();
+        app.device_scan_state = DeviceScanState::Scanning {
+            rx: scan_rx,
+            started_at: std::time::Instant::now(),
+            generation: old_generation,
+            timeout_logged: false,
+        };
+
+        // Exercise the real completed-scan lifecycle, not a manual device switch.
+        app.poll_device_scan(&ctx);
+
+        assert!(
+            app.layout.is_none(),
+            "the unplugged USB workspace is retired"
+        );
+        assert!(app.hid_device.is_none());
+        assert!(matches!(app.connect_state, ConnectState::Loading { .. }));
+        assert!(app.status_msg.starts_with("Connecting to K04"));
+        assert!(!app
+            .device_display_names
+            .contains_key(&macropad.display_name_cache_key()));
+        assert_eq!(app.device_manager.devices().len(), 1);
+        assert_eq!(
+            requests.try_recv().unwrap().0.stable_identity(),
+            k04.stable_identity()
+        );
+    }
+
+    #[test]
     fn scans_preserve_queued_identity_through_absence_and_reordering() {
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());

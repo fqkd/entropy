@@ -106,6 +106,16 @@ pub(crate) fn is_read_request(command: &[u8]) -> bool {
                 | CMD_VIAL_QMK_SETTINGS_QUERY
                 | CMD_VIAL_QMK_SETTINGS_GET
         ),
+        // Pictogram QUERY/package/validity/slot reads never write storage.
+        [0xC0 | 0xC1 | 0xCA | 0xCB, ..] => true,
+        // Capability poll with zero event acknowledgement cannot consume events.
+        // Nonzero acknowledgements and all application-layout writes stay denied.
+        [0xE6, version, 0xA5, 0, 0, rest @ ..]
+            if *version == crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION
+                && rest.iter().all(|byte| *byte == 0) =>
+        {
+            true
+        }
         _ => false,
     }
 }
@@ -142,6 +152,8 @@ pub(crate) fn entlayout_section_of_read(command: &[u8]) -> Option<&'static str> 
         [CMD_VIA_VIAL_PREFIX, CMD_VIAL_QMK_SETTINGS_QUERY | CMD_VIAL_QMK_SETTINGS_GET, ..] => {
             Some("QmkSettings")
         }
+        [0xE6, ..] => Some("ApplicationLayouts"),
+        [0xC0 | 0xC1 | 0xCA | 0xCB, ..] => Some("Pictograms"),
         _ => None,
     }
 }

@@ -83,6 +83,46 @@ fn device(name: &str, source: &str) -> Device {
     }
 }
 
+#[test]
+fn background_profile_binding_survives_registry_owner_replacement() {
+    let mut app = EntropyApp::new_inert_for_test();
+    let mut macropad = device("M4CR0Pad v3", "src/main.rs");
+    macropad.vendor_id = 0xE126;
+    macropad.product_id = 0x0042;
+    let k04 = device("K:04", "src/app.rs");
+    app.device_manager
+        .replace_devices(vec![macropad.clone(), k04]);
+    let factory = &mut |d, m, s, p| QmkHidHostBridge::test_inert(d, m, s, p);
+    attach(&mut app, 0, true);
+    app.sync_qmk_hid_host_bridges_with(factory);
+    app.qmk_hid_hosts
+        .get_mut(&macropad.path)
+        .unwrap()
+        .bind_application_layout_device("macropad-scoped-profile".into());
+    loading(&mut app, 1);
+    app.clear_qmk_hid_host_bridges_for_reconnect_with(factory);
+    assert_eq!(
+        app.qmk_hid_hosts[&macropad.path].application_layout_device_key(),
+        Some("macropad-scoped-profile"),
+        "HID owner replacement lost profile identity"
+    );
+    attach(&mut app, 1, true);
+    app.sync_qmk_hid_host_bridges_with(factory);
+    assert_eq!(
+        app.qmk_hid_hosts[&macropad.path].application_layout_device_key(),
+        Some("macropad-scoped-profile")
+    );
+    let mut replaced = app.device_manager.devices().to_vec();
+    replaced[0].instance_token = "replacement-instance".into();
+    app.device_manager.replace_devices(replaced);
+    app.sync_qmk_hid_host_bridges_with(factory);
+    assert_eq!(
+        app.qmk_hid_hosts[&macropad.path].application_layout_device_key(),
+        None,
+        "new physical instance must not inherit another device's profile key"
+    );
+}
+
 fn time_mode() -> HostDataMode {
     HostDataMode {
         time: true,

@@ -3,10 +3,108 @@ use crate::app::typing_trainer_symbols::TypingTrainerCharacterStatsMap;
 
 const TYPING_TRAINER_SYMBOL_STATS_VERSION: u8 = 1;
 
+#[cfg(test)]
+mod scoped_config_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_storage_restores_nested_roots_and_isolates_parallel_threads() {
+        let original = app_settings_path();
+        let outer = ScopedTempConfig::new();
+        let settings = app_settings_path();
+        assert!(settings.starts_with(outer.path()));
+        std::fs::write(&settings, b"outer settings").unwrap();
+        {
+            let inner = ScopedTempConfig::new();
+            assert!(app_settings_path().starts_with(inner.path()));
+            assert_ne!(app_settings_path(), settings);
+            std::fs::write(app_settings_path(), b"inner settings").unwrap();
+        }
+        assert_eq!(app_settings_path(), settings);
+        let threads: Vec<_> = (0..4)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let _guard = ScopedTempConfig::new();
+                    let path = app_settings_path();
+                    std::fs::write(&path, i.to_string()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), i.to_string());
+                    path
+                })
+            })
+            .collect();
+        let mut roots: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        assert_eq!(roots.len(), 4);
+        assert_eq!(std::fs::read(&settings).unwrap(), b"outer settings");
+        let removed = outer.path().to_path_buf();
+        drop(outer);
+        assert_eq!(app_settings_path(), original);
+        assert!(!removed.exists());
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TypingTrainerSymbolStatsFile {
     version: u8,
     stats: TypingTrainerCharacterStatsMap,
+}
+
+// Test overrides are thread-local: parallel tests never mutate HOME/XDG state.
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Own the temporary output root until all UI polling/persistence has finished.
+/// This guard must stay on the calling thread; workers that need paths must
+/// capture resolved paths before spawning (file-dialog workers only pick input).
+#[cfg(test)]
+pub(super) struct ScopedTempConfig {
+    directory: tempfile::TempDir,
+    previous: Option<std::path::PathBuf>,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl ScopedTempConfig {
+    pub(super) fn new() -> Self {
+        let directory = tempfile::tempdir().expect("create isolated test config");
+        let previous =
+            TEST_CONFIG_DIR.with(|root| root.replace(Some(directory.path().to_path_buf())));
+        Self {
+            directory,
+            previous,
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+
+    pub(super) fn path(&self) -> &std::path::Path {
+        self.directory.path()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedTempConfig {
+    fn drop(&mut self) {
+        TEST_CONFIG_DIR.with(|root| {
+            root.replace(self.previous.take());
+        });
+    }
+}
+
+pub(super) fn storage_config_dir() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(root) = TEST_CONFIG_DIR.with(|root| root.borrow().clone()) {
+        return Some(root);
+    }
+    dirs::config_dir()
 }
 
 /// Sanitize a device name into a filesystem-safe slug.
@@ -24,7 +122,7 @@ pub(super) fn device_id_slug(device_name: &str) -> String {
 }
 
 pub(super) fn layer_names_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -33,7 +131,7 @@ pub(super) fn layer_names_path(device_name: &str) -> std::path::PathBuf {
 }
 
 pub(super) fn single_instance_signal_path() -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -48,7 +146,7 @@ pub(super) fn read_single_instance_signal() -> String {
 }
 
 pub(super) fn app_settings_path() -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -113,7 +211,7 @@ pub(super) fn save_typing_trainer_symbol_stats(
 const TEXT_EXPANDER_MAIN_RULES_FILE: &str = "text_expansion_rules.json";
 
 pub(super) fn text_expander_config_dir() -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -226,7 +324,7 @@ pub(super) fn text_expander_rules_signature(
 }
 
 pub(super) fn display_preset_restore_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -396,19 +494,17 @@ pub(super) fn read_pictogram_file(path: &std::path::Path) -> anyhow::Result<Vec<
             "Invalid pictogram"
         );
         p.bitmap = normalize_pictogram_bitmap(&p.bitmap)?;
-    }
-    let mut result = file.user;
-    // Known stock revisions follow the refreshed library. Preserve unrecognized
-    // imported drawings and all explicit user copies unchanged.
-    for p in file.builtin {
-        if builtin_pictogram_index(&p.bitmap).is_none()
-            && legacy_builtin_pictogram_index(&p.bitmap).is_none()
-            && !result.iter().any(|v| v.bitmap == p.bitmap)
-        {
-            result.push(p);
+        // Carry proven stock provenance through import renaming and re-export.
+        // Unknown/edited records and explicit user authorship are never relabeled.
+        if p.origin == PictogramOrigin::Legacy && is_known_migrated_stock_pictogram(p) {
+            p.origin = PictogramOrigin::Stock;
         }
     }
-    Ok(result)
+    // `builtin` is an exported snapshot of the application's stock catalog.
+    // Its bitmaps change between releases, so an unfamiliar bitmap is not a
+    // user pictogram. Importing it into `user` filled “My pictograms” with
+    // outdated copies of stock icons after every catalog refresh.
+    Ok(file.user)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -424,6 +520,7 @@ pub(super) fn write_pictogram_file(
             .iter()
             .enumerate()
             .map(|(i, key)| SavedPictogram {
+                origin: PictogramOrigin::Stock,
                 name: crate::i18n::tr_catalog(crate::i18n::Language::English, key).to_owned(),
                 color: [84, 189, 191],
                 bitmap: builtin_pictogram_bitmap(i).to_vec(),
@@ -572,7 +669,7 @@ pub(super) fn encoder_visibility_id(device_name: &str, keyboard_id: u64) -> Stri
 }
 
 pub(super) fn encoder_visibility_path(device_id: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -615,7 +712,7 @@ pub(super) fn save_layer_names(names: &[String], device_name: &str) {
 }
 
 pub(super) fn tap_dance_names_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -645,7 +742,7 @@ pub(super) fn save_tap_dance_names(names: &[String], device_name: &str) {
 }
 
 pub(super) fn combo_names_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -675,7 +772,7 @@ pub(super) fn save_combo_names(names: &[String], device_name: &str) {
 }
 
 pub(super) fn combo_colors_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -712,7 +809,7 @@ pub(super) fn combo_display_name(combo_names: &[String], idx: usize) -> String {
 }
 
 pub(super) fn key_override_names_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -749,7 +846,7 @@ pub(super) fn key_override_display_name(key_override_names: &[String], idx: usiz
 }
 
 pub(super) fn alt_repeat_names_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -794,7 +891,7 @@ impl MacroMetadata {
 }
 
 pub(super) fn macro_metadata_path(device_name: &str) -> std::path::PathBuf {
-    let dir = dirs::config_dir()
+    let dir = storage_config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("entropy");
     std::fs::create_dir_all(&dir).ok();
@@ -1111,10 +1208,25 @@ mod pictogram_portability_tests {
     }
 
     #[test]
+    fn unfamiliar_builtin_snapshot_is_not_imported_as_a_user_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("older-stock.json");
+        let bitmap = vec![0xA5; PICTOGRAM_BYTES];
+        let json = serde_json::json!({
+            "version": 2, "width": 35, "height": 35,
+            "builtin": [{"name":"Previous stock artwork","color":[255,255,255],"bitmap":bitmap}],
+            "user": []
+        });
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(read_pictogram_file(&path).unwrap().is_empty());
+    }
+
+    #[test]
     fn portable_library_survives_export_import_and_preserves_pixels() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("icons.json");
         let icon = SavedPictogram {
+            origin: PictogramOrigin::Legacy,
             name: "My icon".into(),
             color: [1, 2, 3],
             bitmap: vec![0xA5; PICTOGRAM_BYTES],

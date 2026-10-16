@@ -1,5 +1,8 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+#[path = "portable_settings/module_contract.rs"]
+mod module_contract;
+use module_contract::{module_setting_import_value, module_setting_valid, EntModuleField};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,6 +29,8 @@ pub(super) struct EntPortableSetting {
     pub(super) value: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) variants: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) module: Option<Vec<EntModuleField>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,6 +112,9 @@ pub(super) fn ent_portable_setting_is_known(qsid: u16) -> bool {
 }
 
 pub(super) fn ent_portable_setting_is_valid(setting: &EntPortableSetting) -> bool {
+    if setting.module.is_some() {
+        return module_setting_valid(setting);
+    }
     if let Some(spec) = ent_portable_setting_spec(setting.qsid) {
         return spec.matches(setting);
     }
@@ -132,6 +140,13 @@ pub(super) fn ent_portable_setting_is_valid(setting: &EntPortableSetting) -> boo
     }
 }
 
+pub(super) fn ent_portable_setting_import_value(
+    source: &EntPortableSetting,
+    target: &EntPortableSetting,
+) -> u16 {
+    module_setting_import_value(source, target)
+}
+
 pub(super) fn ent_portable_setting_contracts_match(
     source: &EntPortableSetting,
     target: &EntPortableSetting,
@@ -140,6 +155,7 @@ pub(super) fn ent_portable_setting_contracts_match(
         && source.qsid == target.qsid
         && source.width == target.width
         && source.variants == target.variants
+        && source.module == target.module
         && ent_portable_setting_is_valid(source)
         && ent_portable_setting_is_valid(target)
 }
@@ -177,6 +193,7 @@ impl EntropyApp {
                         width: spec.width,
                         value,
                         variants: Vec::new(),
+                        module: None,
                     })
             })
             .collect::<Vec<_>>();
@@ -196,6 +213,7 @@ impl EntropyApp {
                 width,
                 value: self.touchpad_settings.dpi,
                 variants,
+                module: None,
             };
             if ent_portable_setting_is_valid(&setting) {
                 settings.push(setting);
@@ -212,12 +230,22 @@ impl EntropyApp {
                 width: EntPortableSettingWidth::U8,
                 value: self.touchpad_settings.auto_layer as u16,
                 variants: self.touchpad_settings.auto_layer_variants.clone(),
+                module: None,
             };
             if ent_portable_setting_is_valid(&setting) {
                 settings.push(setting);
             }
         }
 
+        let modules = self.entlayout_module_settings_snapshot();
+        settings.retain(|setting| {
+            !self
+                .module_settings
+                .fields
+                .iter()
+                .any(|field| field.qsid == setting.qsid)
+        });
+        settings.extend(modules);
         settings.sort_by_key(|setting| setting.qsid);
         settings
     }
@@ -308,6 +336,11 @@ impl EntropyApp {
 
     pub(super) fn apply_entlayout_portable_setting_local(&mut self, setting: &EntPortableSetting) {
         let value = setting.value;
+        if setting.module.is_some() {
+            self.module_settings.values.insert(setting.qsid, value);
+            self.sync_firmware_managed_layout_options();
+            return;
+        }
         match setting.qsid {
             1 => {
                 self.grave_escape_settings.bits = value as u8;
@@ -404,6 +437,7 @@ mod tests {
             width,
             value,
             variants: Vec::new(),
+            module: None,
         }
     }
 

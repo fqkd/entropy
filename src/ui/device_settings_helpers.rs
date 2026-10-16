@@ -1747,16 +1747,19 @@ impl EntropyApp {
         }
 
         for (qsid, width) in Self::module_setting_widths(&settings.fields) {
-            let value = if width > 1 {
+            let result = if width > 1 {
                 dev_conn.get_qmk_setting_u16(qsid)
             } else {
-                dev_conn.get_qmk_setting_u8(qsid).map(|value| value as u16)
+                dev_conn.get_qmk_setting_u8(qsid).map(u16::from)
+            };
+            match result {
+                Ok(value) => {
+                    settings.values.insert(qsid, value);
+                }
+                Err(error) => {
+                    log::warn!("get_qmk_setting(module qsid {qsid}): {error}");
+                }
             }
-            .unwrap_or_else(|e| {
-                log::warn!("get_qmk_setting(module qsid {qsid}): {e}");
-                0
-            });
-            settings.values.insert(qsid, value);
         }
         settings
     }
@@ -1893,7 +1896,7 @@ impl EntropyApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn sync_qmk_hid_host_bridges_with(&mut self, start: &mut QmkBridgeFactory<'_>) {
+    pub(super) fn sync_qmk_hid_host_bridges_with(&mut self, start: &mut QmkBridgeFactory<'_>) {
         // A queued click can already change selected_device while the previous
         // cancelled connector still owns its endpoint. Reserve the actual
         // connector, not the next UI selection, until that handoff begins.
@@ -1973,6 +1976,20 @@ impl EntropyApp {
             }
         }
 
+        let profile_bindings: std::collections::HashMap<_, _> = self
+            .qmk_hid_hosts
+            .iter()
+            .filter(|(path, bridge)| {
+                desired
+                    .get(*path)
+                    .is_some_and(|(device, ..)| qmk_bridge_matches_device(bridge, device))
+            })
+            .filter_map(|(path, bridge)| {
+                bridge
+                    .application_layout_device_key()
+                    .map(|key| (path.clone(), key.to_owned()))
+            })
+            .collect();
         self.qmk_hid_hosts.retain(|path, bridge| {
             let Some((device, mode, shared_output, protocol)) = desired.get(path) else {
                 return false;
@@ -1992,9 +2009,25 @@ impl EntropyApp {
         });
 
         for (path, (device, mode, shared_output, protocol)) in desired {
-            self.qmk_hid_hosts
+            let selected_support = shared_output.as_ref().map(|_| {
+                self.device_about_info.as_ref().is_some_and(|info| {
+                    info.supports_application_layouts
+                        && info.path == device.path
+                        && info.vendor_id == device.vendor_id
+                        && info.product_id == device.product_id
+                })
+            });
+            let binding = profile_bindings.get(&path).cloned();
+            let bridge = self
+                .qmk_hid_hosts
                 .entry(path)
                 .or_insert_with(|| start(device, mode, shared_output, protocol));
+            if let Some(key) = binding {
+                bridge.bind_application_layout_device(key);
+            }
+            if let Some(supported) = selected_support {
+                bridge.set_selected_application_layout_support(supported);
+            }
         }
     }
 
@@ -2059,6 +2092,7 @@ impl EntropyApp {
                 // The former editor no longer holds its HID owner. Continue
                 // its known mode through a freshly discovered dedicated owner.
                 let mode = bridge.mode();
+                let binding = bridge.application_layout_device_key().map(str::to_owned);
                 bridge.suppress_shutdown();
                 bridge.stop();
                 *bridge = start(
@@ -2067,6 +2101,9 @@ impl EntropyApp {
                     None,
                     crate::qmk_hid_host::HostProtocol::Discover,
                 );
+                if let Some(key) = binding {
+                    bridge.bind_application_layout_device(key);
+                }
             }
             true
         });

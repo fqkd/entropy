@@ -8,11 +8,25 @@ fn should_poll_device_scan(main_window_hidden_to_tray: bool, _hid_lifecycle_busy
 }
 
 fn periodic_device_scan_allowed(
-    _selected_device_is_bluetooth: bool,
+    selected_device_is_bluetooth: bool,
     hid_session_active: bool,
 ) -> bool {
-    // A selected Bluetooth keyboard must not hide newly attached USB devices.
-    !hid_session_active
+    // Scanning can contend with an active Bluetooth HID session. USB sessions
+    // are still checked, but at a deliberately low frequency below.
+    !(selected_device_is_bluetooth && hid_session_active)
+}
+
+fn periodic_device_scan_interval_secs(
+    hid_session_active: bool,
+    has_discovered_devices: bool,
+) -> f64 {
+    if hid_session_active {
+        30.0
+    } else if has_discovered_devices {
+        10.0
+    } else {
+        2.0
+    }
 }
 
 fn theme_application_required(
@@ -163,14 +177,17 @@ impl EntropyApp {
             self.poll_device_scan(ctx);
             self.maybe_start_bluetooth_reconnect_scan(ctx);
 
-            #[cfg(target_os = "macos")]
             let hid_session_active = self.hid_device.is_some();
-            #[cfg(not(target_os = "macos"))]
-            let hid_session_active = false;
+            let has_discovered_devices = !self.device_manager.devices().is_empty();
             // Keep the common discovery loop alive even when the selected
             // keyboard is Bluetooth; otherwise newly attached USB keyboards
             // never enter the device menu.
-            if (self.last_device_scan_at == 0.0 || now - self.last_device_scan_at >= 1.0)
+            if (self.last_device_scan_at == 0.0
+                || now - self.last_device_scan_at
+                    >= periodic_device_scan_interval_secs(
+                        hid_session_active,
+                        has_discovered_devices,
+                    ))
                 && periodic_device_scan_allowed(selected_device_is_bluetooth, hid_session_active)
             {
                 self.scan_frame = self.scan_frame.wrapping_add(1);
@@ -197,6 +214,34 @@ impl EntropyApp {
         self.finish_deferred_full_layout_action(ctx);
         self.maybe_start_periodic_battery_refresh(ctx, main_window_hidden_to_tray);
         self.maybe_start_deferred_device_load(ctx, main_window_hidden_to_tray);
+        self.update_application_layout_runtime();
+        // Foreground application changes happen while Entropy itself is not
+        // focused. Keep a lightweight runtime tick alive so auto-switching is
+        // not accidentally tied to egui input/repaint events.
+        if self.application_layouts_supported()
+            || self.qmk_hid_hosts.values().any(|bridge| {
+                super::application_layout_runtime::device_supports_application_layouts(
+                    bridge.device(),
+                ) && !self.app_settings.application_layouts.is_empty()
+                    && self
+                        .device_manager
+                        .devices()
+                        .iter()
+                        .any(|device| device.permits_hid_target(bridge.device()))
+            })
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(super) fn tick_layout_import_lifecycle_for_test(&mut self, ctx: &egui::Context, now: f64) {
+        // Exercise the same worker/deferred/import/runtime ordering as a native frame.
+        // Keep periodic discovery not due even while a worker owns hid_device:
+        // pretending the device is Bluetooth alone only suppresses scanning when
+        // hid_device is Some. A real scan can invalidate this synthetic connection.
+        self.last_device_scan_at = now.max(f64::EPSILON);
+        self.update_native_background(ctx, now, false, true);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -487,6 +532,50 @@ mod tests {
     use super::super::settings_write_queue::SettingsWriteStatus;
     use super::*;
     use crate::keyboard::{KeyboardLayout, LayoutOption, PhysicalKey};
+
+    #[test]
+    fn tray_background_tick_keeps_macropad_service_alive_with_k04_selected() {
+        let _storage = crate::app::app_storage::ScopedTempConfig::new();
+        let mut app = EntropyApp::new_inert_for_test();
+        let mut macropad = crate::device::test_usb_device("3-3", 5, 0x42);
+        macropad.name = "M4CR0Pad v3".into();
+        let mut k04 = crate::device::test_usb_device("3-2", 9, 0x04);
+        k04.name = "K:04".into();
+        app.device_manager
+            .replace_devices(vec![macropad.clone(), k04]);
+        app.selected_device = Some(1);
+        app.last_device_scan_at = 1.0;
+        app.app_settings
+            .application_layouts
+            .insert("tray-macropad".into(), Default::default());
+        let bridge = crate::qmk_hid_host::QmkHidHostBridge::test_inert(
+            macropad.clone(),
+            Default::default(),
+            None,
+            crate::qmk_hid_host::HostProtocol::Discover,
+        );
+        // Cold-start worker has not published UID/capabilities yet.
+        app.qmk_hid_hosts.insert(macropad.path.clone(), bridge);
+        let ctx = egui::Context::default();
+        let mut delay = std::time::Duration::MAX;
+        for frame in 0..4 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(f64::from(frame)),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.update_native_background(ui.ctx(), 1.0, true, true);
+                },
+            );
+            delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        }
+        assert!(
+            delay <= std::time::Duration::from_millis(200),
+            "hidden tray runtime stopped ticking while Macropad is connected: {delay:?}"
+        );
+        assert_eq!(app.selected_device, Some(1));
+    }
 
     #[test]
     fn macro_tab_preflight_does_not_reopen_after_cancel_until_tab_changes() {
@@ -1196,6 +1285,10 @@ mod tests {
         assert!(periodic_device_scan_allowed(true, false));
         assert!(periodic_device_scan_allowed(false, false));
         assert!(!periodic_device_scan_allowed(true, true));
+        assert!(periodic_device_scan_allowed(false, true));
+        assert_eq!(periodic_device_scan_interval_secs(false, false), 2.0);
+        assert_eq!(periodic_device_scan_interval_secs(false, true), 10.0);
+        assert_eq!(periodic_device_scan_interval_secs(true, true), 30.0);
     }
 
     #[test]
@@ -1357,7 +1450,10 @@ impl eframe::App for EntropyApp {
         let import_pending_at_frame_start = self.import_pending();
         #[cfg(target_arch = "wasm32")]
         let import_pending_at_frame_start = false;
-        let modal_or_popup_open_at_frame_start = self.keycode_picker.open
+        let modal_or_popup_open_at_frame_start = self.application_categories_open
+            || self.application_picker_open
+            || self.text_expander_rule_editor.is_some()
+            || self.keycode_picker.open
             || self.unlock_open
             || self.vial_unlock_polling
             || self.close_to_tray_prompt_open
@@ -1450,6 +1546,32 @@ impl eframe::App for EntropyApp {
 
             if self.selected_device.is_none() && !reconnecting_with_layout {
                 let rect = ui.max_rect();
+                if self.settings_tab == SettingsTab::ApplicationLayouts
+                    && self.offline_application_layouts_available()
+                {
+                    self.draw_application_layouts_settings_page(ui, rect);
+                    let back_rect = egui::Rect::from_min_size(
+                        egui::pos2(rect.left() + 18.0, rect.top() + 18.0),
+                        egui::vec2(128.0, 32.0),
+                    );
+                    crate::ui_style::allocate_ui_at_rect(ui, back_rect, |ui| {
+                        if crate::ui_style::modern_button(
+                            ui,
+                            super::application_layout_runtime::app_layout_text(
+                                self.app_settings.language,
+                                "К подключению",
+                                "Back to connection",
+                            ),
+                            back_rect.size(),
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.settings_tab = SettingsTab::AppSettings;
+                        }
+                    });
+                    return;
+                }
                 #[cfg(target_os = "linux")]
                 if !super::app_settings_ui::linux_vial_udev_rules_installed()
                     && !self
@@ -1550,6 +1672,23 @@ impl eframe::App for EntropyApp {
                             .size(13.0)
                             .color(app_muted_text(self.dark_mode)),
                         );
+                        if self.offline_application_layouts_available() {
+                            ui.add_space(14.0);
+                            if crate::ui_style::modern_button(
+                                ui,
+                                super::application_layout_runtime::app_layout_text(
+                                    self.app_settings.language,
+                                    "Раскладки приложений",
+                                    "Application layouts",
+                                ),
+                                egui::vec2(190.0, 34.0),
+                                true,
+                            )
+                            .clicked()
+                            {
+                                self.open_application_layouts_page();
+                            }
+                        }
                     });
                 });
                 return;
@@ -1990,12 +2129,20 @@ impl eframe::App for EntropyApp {
         #[cfg(not(target_arch = "wasm32"))]
         self.maybe_start_combo_write(ctx);
 
-        let mut settings_page_navigation_handled = false;
-        if self.can_return_from_settings_page(
-            ctx,
-            modal_or_popup_open_at_frame_start,
-            keyboard_input_wanted_at_frame_start,
-        ) {
+        if self.main_menu_tab != MainMenuTab::Keyboard
+            || self.layout.is_none()
+            || self.current_encoder_visibility_id.is_empty()
+        {
+            self.editing_layout_visibility = false;
+        }
+        let mut settings_page_navigation_handled = self.finish_layout_visibility_edit_on_input(ctx);
+        if !settings_page_navigation_handled
+            && self.can_return_from_settings_page(
+                ctx,
+                modal_or_popup_open_at_frame_start,
+                keyboard_input_wanted_at_frame_start,
+            )
+        {
             let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             let rclick = ctx.input(|i| i.pointer.secondary_clicked());
             if esc_pressed || rclick {

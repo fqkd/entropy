@@ -122,6 +122,36 @@ impl EntropyApp {
             qmk_hid_hosts: std::collections::HashMap::new(),
             #[cfg(target_os = "windows")]
             codex_macropad_bridge: None,
+            application_layout_editor_active: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            application_discovery: Default::default(),
+            #[cfg(target_os = "linux")]
+            gnome_integration_install_task: None,
+            #[cfg(target_os = "linux")]
+            gnome_integration_install_result: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            application_layout_foreground: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            application_layout_manual_override: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_layout_sync_retry_after: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_layout_device_reconciled: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            default_layout_pending_layers: 0,
+            application_picker_open: false,
+            application_picker_assign_existing: false,
+            application_picker_target_layout_id: None,
+            application_picker_search: String::new(),
+            application_picker_selected: None,
+            application_picker_name: String::new(),
+            application_picker_category:
+                crate::application_layouts::ApplicationLayoutCategory::Other,
+            application_picker_category_changed: false,
+            application_picker_custom_category_id: None,
+            application_categories_open: false,
+            application_categories_selected_id: None,
+            application_categories_name: String::new(),
             pending_device_connect: None,
             #[cfg(not(target_arch = "wasm32"))]
             headless: false,
@@ -247,6 +277,8 @@ impl EntropyApp {
             key_override_visible_count: 1,
             key_override_undo_stack: Vec::new(),
             text_expander_deleted_rules: Vec::new(),
+            text_expander_rule_editor: None,
+            text_expander_rule_editor_focus_pending: false,
             text_expander_emoji_search: String::new(),
             text_expander_emoji_group: 0,
             text_expander_emoji_target: None,
@@ -279,9 +311,11 @@ impl EntropyApp {
             editing_layer: None,
             editing_layer_text: String::new(),
             editing_layer_focus_requested: false,
+            editing_layer_layout_id: None,
             current_device_name: String::new(),
             current_keyboard_id: None,
             current_encoder_visibility_id: String::new(),
+            editing_layout_visibility: false,
             device_display_names: std::collections::HashMap::new(),
             device_about_info: None,
             update_check,

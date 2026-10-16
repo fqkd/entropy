@@ -28,15 +28,64 @@ use super::typing_trainer_symbols::{
 };
 use super::*;
 
+/// Legacy files did not record authorship. Never infer it from display RGB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PictogramOrigin {
+    #[default]
+    Legacy,
+    User,
+    Stock,
+}
+
+impl PictogramOrigin {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SavedPictogram {
     pub(crate) name: String,
     pub(crate) color: [u8; 3],
     pub(crate) bitmap: Vec<u8>,
+    #[serde(default, skip_serializing_if = "PictogramOrigin::is_legacy")]
+    pub(crate) origin: PictogramOrigin,
+}
+
+/// Entropy-only visibility of physical positions, independent of the firmware keymap.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct LayoutElementVisibility {
+    #[serde(default)]
+    pub(crate) hidden_keys: std::collections::BTreeSet<(u8, u8)>,
+    #[serde(default)]
+    pub(crate) hidden_encoders: std::collections::BTreeSet<u8>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AppSettings {
+    /// Local cosmetic choices, keyed by the same stable device identity as encoder visibility.
+    #[serde(default)]
+    pub(crate) layout_element_visibility:
+        std::collections::BTreeMap<String, LayoutElementVisibility>,
+    /// Tracks each device whose model-wide encoder visibility was imported locally.
+    #[serde(default)]
+    pub(crate) migrated_fixed_encoder_visibility: std::collections::BTreeSet<String>,
+    /// Per-device application layouts. Kept in Entropy settings so the base
+    /// Vial keymap remains the reliable fallback when Entropy is not running.
+    #[serde(default)]
+    pub(crate) application_layouts:
+        std::collections::BTreeMap<String, crate::application_layouts::DeviceApplicationLayouts>,
+    /// Last Macropad application-layout profile opened by the user. Keeping
+    /// this small identity lets Entropy continue resolving foreground apps and
+    /// editing saved profiles while the USB device is temporarily offline.
+    #[serde(default)]
+    pub(crate) last_application_layout_device_key: Option<String>,
+    /// Stable physical identity, scoped by Vial UID and hardware revision. Never HID paths.
+    #[serde(default)]
+    pub(crate) application_layout_bindings: std::collections::BTreeMap<String, (u16, u16, String)>,
+    #[serde(default)]
+    pub(crate) last_application_layout_device_name: Option<String>,
     #[serde(default)]
     pub(crate) minimize_to_tray_on_close: bool,
     #[serde(default)]
@@ -192,6 +241,12 @@ pub(crate) fn clamp_ui_scale(scale: f32) -> f32 {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            layout_element_visibility: std::collections::BTreeMap::new(),
+            migrated_fixed_encoder_visibility: std::collections::BTreeSet::new(),
+            application_layouts: std::collections::BTreeMap::new(),
+            last_application_layout_device_key: None,
+            application_layout_bindings: Default::default(),
+            last_application_layout_device_name: None,
             minimize_to_tray_on_close: false,
             close_to_tray_behavior: CloseToTrayBehavior::Ask,
             launch_at_startup: false,
@@ -234,6 +289,23 @@ impl Default for AppSettings {
 #[cfg(test)]
 mod app_settings_tests {
     use super::*;
+
+    #[test]
+    fn tap_dance_keycap_keeps_slot_label_and_tooltip_keeps_custom_name() {
+        let names = &["t1".to_owned()];
+        assert_eq!(
+            keycode_label_with_macro_names(0x5700, &[], &[], &[], names, KeyLegendLayout::English),
+            "TD0"
+        );
+        assert_eq!(
+            keycode_tooltip_with_macro_names(0x5700, &[], &[], &[], &[], names),
+            "t1 — tap dance 0"
+        );
+        assert_eq!(
+            keycode_label_with_macro_names(0x5700, &[], &[], &[], &[], KeyLegendLayout::English),
+            "TD0"
+        );
+    }
 
     #[test]
     fn app_settings_default_dark_mode_is_light() {
@@ -281,7 +353,7 @@ pub(crate) fn keycode_label_with_macro_names(
     custom: &[crate::keyboard::CustomKeycode],
     layer_names: &[String],
     macro_names: &[String],
-    tap_dance_names: &[String],
+    _tap_dance_names: &[String],
     key_legend_layout: KeyLegendLayout,
 ) -> String {
     if (0x7700..=0x77FF).contains(&value) {
@@ -293,9 +365,8 @@ pub(crate) fn keycode_label_with_macro_names(
     }
     if (0x5700..=0x57FF).contains(&value) {
         let idx = (value - 0x5700) as usize;
-        if let Some(name) = tap_dance_custom_name(tap_dance_names, idx) {
-            return format!("TD{}\n{}", idx, name);
-        }
+        // Keep the slot identifier on the keycap; the custom name belongs in
+        // the tooltip and editor, not on the macropad preview.
         return format!("TD{}", idx);
     }
     keycode_label_with_names_and_layout(value, custom, layer_names, key_legend_layout)
@@ -479,6 +550,9 @@ pub(crate) struct DeviceAboutInfo {
     pub(crate) product_id: u16,
     pub(crate) path: String,
     pub(crate) firmware_version: Option<String>,
+    pub(crate) supports_application_layouts: bool,
+    // Connection-local only; never a persisted editor/runtime authority grant.
+    pub(crate) application_layout_probe_failed: bool,
     pub(crate) firmware_update_target: Option<FirmwareReleaseTarget>,
     pub(crate) supports_battery_halves: bool,
     pub(crate) battery_halves: Option<crate::hid::BatteryHalves>,
@@ -2539,8 +2613,8 @@ impl Default for DisplaySettingsState {
             date: DATE_DEFAULT,
             confirmed_date: DATE_DEFAULT,
             supported: false,
-            color: [200, 178, 146],
-            confirmed_color: [200, 178, 146],
+            color: [209, 177, 139],
+            confirmed_color: [209, 177, 139],
             background_color_supported: false,
             background_color: [0, 0, 0],
             confirmed_background_color: [0, 0, 0],
@@ -2558,8 +2632,8 @@ impl Default for DisplaySettingsState {
             startup_image_preview_rgba: Vec::new(),
             startup_image_preview_revision: 0,
             clock_settings_supported: false,
-            clock_text_color: [255, 255, 255],
-            confirmed_clock_text_color: [255, 255, 255],
+            clock_text_color: [209, 177, 139],
+            confirmed_clock_text_color: [209, 177, 139],
             clock_overlay_controls_supported: false,
             clock_visible: true,
             confirmed_clock_visible: true,
@@ -2571,13 +2645,13 @@ impl Default for DisplaySettingsState {
             confirmed_clock_info_opacity: 100,
             clock_modifiers_visible: true,
             confirmed_clock_modifiers_visible: true,
-            clock_modifiers_color: [255, 255, 255],
-            confirmed_clock_modifiers_color: [255, 255, 255],
+            clock_modifiers_color: [209, 177, 139],
+            confirmed_clock_modifiers_color: [209, 177, 139],
             clock_modifiers_opacity: 100,
             confirmed_clock_modifiers_opacity: 100,
             clock_info_color_supported: false,
-            clock_info_color: [255, 255, 255],
-            confirmed_clock_info_color: [255, 255, 255],
+            clock_info_color: [209, 177, 139],
+            confirmed_clock_info_color: [209, 177, 139],
             clock_background_asset_supported: false,
             clock_background_kind: 0,
             clock_background_frames: 0,
@@ -2706,7 +2780,7 @@ pub(crate) fn load_display_settings(
     let clock_text_color = if clock_settings_supported {
         read_display_rgb(dev_conn, CLOCK_TEXT_COLOR_QSIDS)?
     } else {
-        [255, 255, 255]
+        color
     };
     let clock_overlay_controls_supported = [
         CLOCK_VISIBLE_QSID,
@@ -2747,7 +2821,7 @@ pub(crate) fn load_display_settings(
     let clock_modifiers_color = if clock_overlay_controls_supported {
         read_display_rgb(dev_conn, CLOCK_MODIFIERS_COLOR_QSIDS)?
     } else {
-        [255, 255, 255]
+        color
     };
     let clock_modifiers_opacity = if clock_overlay_controls_supported {
         read_display_setting_u8(dev_conn, CLOCK_MODIFIERS_OPACITY_QSID)?.min(100)
@@ -2761,7 +2835,7 @@ pub(crate) fn load_display_settings(
     let clock_info_color = if clock_info_color_supported {
         read_display_rgb(dev_conn, CLOCK_INFO_COLOR_QSIDS)?
     } else {
-        [255, 255, 255]
+        color
     };
     let clock_background_dim_supported =
         clock_settings_supported && supported_qmk_settings.contains(&CLOCK_BACKGROUND_DIM_QSID);
@@ -3193,6 +3267,13 @@ pub(crate) fn is_alt_repeat_keycode(kc: u16) -> bool {
 
 #[derive(Clone, Debug)]
 pub(super) enum UndoAction {
+    ApplicationLayoutControl {
+        device_key: String,
+        layout_id: String,
+        layer: usize,
+        control: usize,
+        old_keycode: u16,
+    },
     Key {
         layer: usize,
         key_idx: usize,
@@ -3254,9 +3335,16 @@ pub(crate) enum ComboPickField {
     Output,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TextExpanderRuleField {
+    Trigger,
+    Replacement,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsTab {
     AppSettings,
+    ApplicationLayouts,
     MatrixTester,
     TextExpanderSetup,
     TextExpander,
@@ -5193,6 +5281,50 @@ pub struct EntropyApp {
         std::collections::HashMap<String, crate::qmk_hid_host::QmkHidHostBridge>,
     #[cfg(target_os = "windows")]
     pub(crate) codex_macropad_bridge: Option<crate::codex_macropad::Bridge>,
+    /// True while the normal keyboard canvas edits the selected application
+    /// layout instead of writing the permanent Vial keymap.
+    pub(crate) application_layout_editor_active: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) application_discovery: crate::app_discovery::ApplicationDiscoverySnapshot,
+    #[cfg(target_os = "linux")]
+    pub(crate) gnome_integration_install_task:
+        Option<crate::app_discovery::GnomeIntegrationInstallTask>,
+    #[cfg(target_os = "linux")]
+    pub(crate) gnome_integration_install_result:
+        Option<Result<crate::app_discovery::GnomeIntegrationInstallReport, String>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) application_layout_foreground:
+        Option<crate::application_layouts::DetectedApplication>,
+    /// A layout selected from the main Layout page stays active until focus
+    /// moves to a different application. Store both the device and foreground
+    /// application captured at selection time so polling the same window
+    /// cannot immediately undo the user's choice.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) application_layout_manual_override: Option<(
+        String,
+        Option<crate::application_layouts::DetectedApplication>,
+    )>,
+    /// Avoid retrying a failed, explicitly requested Default keymap write every UI tick.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) default_layout_sync_retry_after: Option<std::time::Instant>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) default_layout_device_reconciled: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) default_layout_pending_layers: u16,
+    pub(crate) application_picker_open: bool,
+    pub(crate) application_picker_assign_existing: bool,
+    /// Stable profile selected when the edit dialog opens. Foreground changes
+    /// must not redirect the dialog to another profile before Save is clicked.
+    pub(crate) application_picker_target_layout_id: Option<String>,
+    pub(crate) application_picker_search: String,
+    pub(crate) application_picker_selected: Option<crate::application_layouts::DetectedApplication>,
+    pub(crate) application_picker_name: String,
+    pub(crate) application_picker_category: crate::application_layouts::ApplicationLayoutCategory,
+    pub(crate) application_picker_category_changed: bool,
+    pub(crate) application_picker_custom_category_id: Option<String>,
+    pub(crate) application_categories_open: bool,
+    pub(crate) application_categories_selected_id: Option<String>,
+    pub(crate) application_categories_name: String,
     /// Current firmware type (mirrors layout.firmware)
     pub(crate) firmware: FirmwareProtocol,
     /// QMK setting ids the connected firmware exposes (from the connect probe).
@@ -5306,6 +5438,8 @@ pub struct EntropyApp {
     pub(crate) key_override_visible_count: usize,
     pub(crate) key_override_undo_stack: Vec<(Vec<KeyOverrideEntry>, Vec<String>, usize, usize)>,
     pub(crate) text_expander_deleted_rules: Vec<(usize, crate::text_expander::TextExpansionRule)>,
+    pub(crate) text_expander_rule_editor: Option<(usize, TextExpanderRuleField)>,
+    pub(crate) text_expander_rule_editor_focus_pending: bool,
     pub(crate) text_expander_emoji_search: String,
     pub(crate) text_expander_emoji_group: usize,
     pub(crate) text_expander_emoji_target: Option<(usize, usize, usize)>,
@@ -5340,6 +5474,10 @@ pub struct EntropyApp {
     pub(crate) editing_layer: Option<usize>, // layer being renamed
     pub(crate) editing_layer_text: String,
     pub(crate) editing_layer_focus_requested: bool,
+    /// Stable application-layout id captured when layer-name editing starts.
+    /// Foreground application changes must never redirect the draft to the
+    /// newly selected profile.
+    pub(crate) editing_layer_layout_id: Option<String>,
     /// Current connected device name (for per-device layer names)
     pub(crate) current_device_name: String,
     /// Stable Vial keyboard id for the current firmware definition, when available.
@@ -5347,6 +5485,8 @@ pub struct EntropyApp {
     /// Stable local settings key for encoder visibility. Uses Vial keyboard id when available
     /// so keyboards with the same display name do not share hidden/shown encoder settings.
     pub(crate) current_encoder_visibility_id: String,
+    /// Temporary interaction mode; only the per-device choices above are persisted.
+    pub(crate) editing_layout_visibility: bool,
     /// Friendly names learned from firmware/device info, keyed by device path.
     pub(crate) device_display_names: std::collections::HashMap<String, String>,
     pub(crate) device_about_info: Option<DeviceAboutInfo>,

@@ -104,6 +104,15 @@
             # Unit tests are pure (i18n catalogs, layout parsing, bundled script
             # contents) — no keyboard, X server or network needed.
             doCheck = true;
+            # Sandboxed builders have a non-writable HOME. Keep all test outputs
+            # local to this check, without disabling persistence tests.
+            preCheck = ''
+              export HOME="$(mktemp -d)"
+              export XDG_CONFIG_HOME="$HOME/.config"
+              export XDG_DATA_HOME="$HOME/.local/share"
+              export XDG_CACHE_HOME="$HOME/.cache"
+              mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME"
+            '';
 
             desktopItems = [
               (pkgs.makeDesktopItem {

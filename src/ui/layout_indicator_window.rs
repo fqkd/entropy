@@ -580,7 +580,14 @@ impl EntropyApp {
 
         let viewport_id = sticky_layout_viewport_id();
         let lang = self.app_settings.language;
-        let layout = self.layout.clone();
+        let application_layout_active = self.application_layouts_supported();
+        let layout = self.layout.as_ref().map(|layout| {
+            if application_layout_active {
+                self.application_layout_active_rendered_copy(layout)
+            } else {
+                layout.clone()
+            }
+        });
         let selected_device_name = self
             .selected_device
             .and_then(|idx| self.device_manager.devices().get(idx))
@@ -615,7 +622,11 @@ impl EntropyApp {
             .map(|layout| self.sync_sticky_layout_layer_state(layout))
             .unwrap_or(0);
         self.sticky_layout_active_layer = sticky_layer;
-        let layer_names = self.layer_names.clone();
+        let layer_names = if application_layout_active {
+            self.application_layout_active_layer_names()
+        } else {
+            self.layer_names.clone()
+        };
         let macro_names = self.keycode_picker.macro_names.clone();
         let tap_dance_names = self.keycode_picker.tap_dance_names.clone();
         let key_legend_layout = self.app_settings.key_legend_layout;

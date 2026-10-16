@@ -7,8 +7,10 @@ use super::*;
 /// Running it on the egui/winit UI thread freezes the whole app for the
 /// duration and corrupts input state afterwards (menus stop responding), so
 /// every dialog runs on a worker thread and delivers its result here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileDialogAction {
+    ImportApplicationLayout(String),
+    ExportApplicationLayout(String),
     ImportEntlayout,
     ExportEntlayout,
     ImportEntsettings,
@@ -27,7 +29,9 @@ impl FileDialogAction {
     /// open. App-settings import/export are device-independent.
     fn is_device_scoped(self) -> bool {
         match self {
-            FileDialogAction::ImportEntlayout
+            FileDialogAction::ImportApplicationLayout(_)
+            | FileDialogAction::ExportApplicationLayout(_)
+            | FileDialogAction::ImportEntlayout
             | FileDialogAction::ExportEntlayout
             | FileDialogAction::ExportLayoutImage
             | FileDialogAction::StartupImage
@@ -302,6 +306,23 @@ impl raw_window_handle::HasDisplayHandle for ParentWindow {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DIALOG_RESULT: std::cell::RefCell<Option<Option<std::path::PathBuf>>> = const { std::cell::RefCell::new(None) };
+    static TEST_DIALOG_OPTIONS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Replace only the native portal boundary in UI click tests.
+#[cfg(test)]
+pub(crate) fn set_test_dialog_result(path: Option<std::path::PathBuf>) {
+    TEST_DIALOG_RESULT.with(|result| *result.borrow_mut() = Some(path));
+}
+
+#[cfg(test)]
+pub(crate) fn test_dialog_options() -> String {
+    TEST_DIALOG_OPTIONS.with(|options| options.borrow().clone())
+}
+
 impl EntropyApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn cache_parent_window_handles(&mut self, frame: &eframe::Frame) {
@@ -336,6 +357,13 @@ impl EntropyApp {
             dialog = dialog.set_parent(&ParentWindow { window, display });
         }
         let (tx, rx) = std::sync::mpsc::channel();
+        #[cfg(test)]
+        if let Some(path) = TEST_DIALOG_RESULT.with(|result| result.borrow_mut().take()) {
+            TEST_DIALOG_OPTIONS.with(|options| *options.borrow_mut() = format!("{dialog:?}"));
+            tx.send(path).unwrap();
+            self.pending_file_dialog = Some((action, self.connection_generation, rx));
+            return;
+        }
         std::thread::spawn(move || {
             let result = if save {
                 dialog.save_file()
@@ -365,10 +393,15 @@ impl EntropyApp {
         let Some((action, generation, rx)) = &self.pending_file_dialog else {
             return;
         };
-        let action = *action;
+        let action = action.clone();
         let generation = *generation;
         let recv = rx.try_recv();
-        match classify_file_dialog_poll(recv, action, generation, self.connection_generation) {
+        match classify_file_dialog_poll(
+            recv,
+            action.clone(),
+            generation,
+            self.connection_generation,
+        ) {
             FileDialogPoll::Pending => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(50));
             }
@@ -417,6 +450,18 @@ impl EntropyApp {
         path: std::path::PathBuf,
     ) {
         match action {
+            FileDialogAction::ImportApplicationLayout(id) => {
+                self.status_msg = match self.import_application_layout_from_path(&path, &id) {
+                    Ok(()) => format!("Imported application layout into {id}. Other profiles, app matching and shared resources were preserved."),
+                    Err(error) => format!("Application import failed: {error:#}"),
+                };
+            }
+            FileDialogAction::ExportApplicationLayout(id) => {
+                self.status_msg = match self.write_application_layout_export(&path, &id) {
+                    Ok(()) => format!("Exported application layout: {} (keys, layer names and encoder stacks only; shared resources are not included)", path.display()),
+                    Err(error) => format!("Application export failed: {error:#}"),
+                };
+            }
             FileDialogAction::ImportEntlayout => self.begin_entlayout_import(path),
             FileDialogAction::ExportEntlayout => self.write_entlayout_export(&path),
             FileDialogAction::ImportEntsettings => self.begin_entsettings_import(path),
@@ -439,12 +484,19 @@ impl EntropyApp {
             FileDialogAction::ImportPictograms => match read_pictogram_file(&path) {
                 Ok(icons) => {
                     for mut icon in icons {
-                        if self
-                            .app_settings
-                            .saved_pictograms
-                            .iter()
-                            .any(|p| p.name == icon.name && p.bitmap == icon.bitmap)
+                        if let Some(existing) =
+                            self.app_settings.saved_pictograms.iter_mut().find(|p| {
+                                p.name == icon.name
+                                    && p.bitmap == icon.bitmap
+                                    && p.color == icon.color
+                            })
                         {
+                            // Explicit authorship survives importing an exact
+                            // duplicate of a previously hidden stock snapshot.
+                            // Importing stock must never downgrade a user record.
+                            if icon.origin == PictogramOrigin::User {
+                                existing.origin = PictogramOrigin::User;
+                            }
                             continue;
                         }
                         let base = icon.name.clone();

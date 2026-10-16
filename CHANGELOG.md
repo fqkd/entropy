@@ -5,6 +5,43 @@ All notable public changes to Entropy are tracked here.
 Entropy uses public release versions for GitHub releases and internal build versions
 for development history. The first public beta is `v0.1.0-beta.1`.
 
+## v0.5.0 - Public Beta
+
+### Main Features
+
+- Added per-application layouts and automatic switching for Macropad v2 and v3 on compatible firmware, with editable presets, application categories, and background operation while another keyboard is selected
+- Added cross-tab keycode search, including localized descriptions, custom keycodes, named Macro and Tap Dance slots, and Universal Symbols
+- Added headless `--export-layout` for scripted `.entlayout` backups, with device selection and read-only keyboard access
+- Added local Show/Hide Keys editing per keyboard, preserved in layout backups and exported images
+- Extended layout backups to include compatible module settings and, on supported Macropads, Default and all application layouts together with their shared resources
+
+### Improvements
+
+- Added category icons to picker tabs and grouped top menus, with keyboard and screen-reader support for picker controls
+- Added a shared, grouped Macropad icon catalog and automatic persistence of Default layout assignments
+- Added Linux `.deb`, `.rpm`, and Arch package build targets and a pinned container build path, with shared desktop integration and package checks
+- Added expanded Text Expander rule editing and Linux IBus source reinstall and removal controls
+- Added English and Russian labels and tooltips for the K:04 auto-layer threshold setting
+- Improved encoder settings for K:03 and Imperial44, layer-name editing during loading, and layout editor spacing
+
+### Fixes
+
+- Corrected RMK unlock completion confirmation and Vial protected-page access, cancellation, and return navigation
+- Allowed macOS Bluetooth HID connections after stale permission preflight results while preserving actual permission-denial guidance
+- Accepted Option-modified text in Typing Trainer and removed blocking System Events lookups from macOS Text Expander settings and typing callbacks
+- Aligned Vial alternate layouts, retained matching older-backup assignments, and added readable tri-layer labels
+- Preserved Macropad Default edits and custom pictograms, isolated background switching from the selected keyboard, and improved backup validation and recovery after failed transfers
+- Preserved Entropy's native X11 window identity and corrected legacy application profiles mislabeled as Vial
+
+### Contributors
+
+- Special thanks to @jidckii for Linux packaging and reproducible build tooling in #152
+- Special thanks to @AlexBSoD for the K:04 threshold labels and headless layout export in #168 and #169
+- Special thanks to @D19ital for RMK unlock confirmation and shared encoder settings in #170 and #186
+- Special thanks to @IgorArkhipov for Typing Trainer input, macOS Bluetooth and Text Expander fixes, Vial lock handling, alternate layouts, and tri-layer labels in #171, #172, #175, #179, and #181
+- Special thanks to @Glitchy-Sheep for picker search, category icons, and grouped top menus in #173 and #174
+- Special thanks to @Yurii-Q for Macropad application layouts, icons, Default persistence, background switching, and complete layout backups in #177, #185, #187, #189, and #190
+
 ## v0.4.0 - Public Beta
 
 ### Main Features

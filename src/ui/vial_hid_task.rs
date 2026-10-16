@@ -960,6 +960,8 @@ impl EntropyApp {
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_vial_lock(&mut self) {
         self.vial_unlocked = Some(false);
+        // A protected settings page must not remain interactive after lock.
+        self.main_menu_tab = MainMenuTab::Keyboard;
         self.matrix_tester_pressed.clear();
         self.matrix_tester_unlock_prompted = false;
         self.matrix_tester_lock_checked = false;
@@ -992,8 +994,16 @@ impl EntropyApp {
                 self.display_settings.pictograms.loading = false;
                 self.display_settings.pictograms.load_failure =
                     Some((self.connection_generation, error.clone()));
-                // A failed read is not proof that the firmware lacks storage.
-                if self.display_settings.pictograms.supported != Some(true) {
+                // Only the QUERY's explicit command/format rejection establishes
+                // unsupported storage (these errors originate in load_pictograms).
+                // Status/transport/read failures leave capability unconfirmed so
+                // Choose can retry, but loaded=false still prevents assignments.
+                if self.display_settings.pictograms.supported != Some(true)
+                    && matches!(
+                        error.as_str(),
+                        "pictogram command 0xC0 is unsupported" | "unsupported pictogram format"
+                    )
+                {
                     self.display_settings.pictograms.supported = Some(false);
                 }
             }
@@ -1717,6 +1727,44 @@ mod tests {
         ));
         let requests = recorder.requests();
         assert_eq!(&requests[0][..2], &[0x02, 0x03]);
+    }
+
+    #[test]
+    fn successful_lock_exits_protected_settings_pages() {
+        for tab in [SettingsTab::Macros, SettingsTab::TapDance] {
+            let ctx = egui::Context::default();
+            let mut app = EntropyApp::new_inert_for_test();
+            let (hid, recorder) = crate::hid::HidDevice::test_device();
+            app.hid_device = Some(hid);
+            app.firmware = FirmwareProtocol::Vial;
+            app.layout = Some(single_key_layout(0x0004));
+            app.vial_unlocked = Some(true);
+            app.main_menu_tab = MainMenuTab::Advanced;
+            app.settings_tab = tab;
+
+            assert_eq!(app.start_vial_lock(&ctx), VialHidTaskStart::Started);
+            poll_until_vial_hid_idle(&mut app, &ctx);
+
+            assert_eq!(app.vial_unlocked, Some(false));
+            assert!(app.main_menu_tab == MainMenuTab::Keyboard);
+            assert!(app.settings_tab == tab);
+            assert_eq!(&recorder.requests()[0][..2], &[0xFE, 0x08]);
+        }
+    }
+
+    #[test]
+    fn unavailable_device_does_not_exit_settings_page() {
+        let ctx = egui::Context::default();
+        let mut app = EntropyApp::new_inert_for_test();
+        app.firmware = FirmwareProtocol::Vial;
+        app.layout = Some(single_key_layout(0x0004));
+        app.vial_unlocked = Some(true);
+        app.main_menu_tab = MainMenuTab::Advanced;
+        app.settings_tab = SettingsTab::Macros;
+
+        assert_eq!(app.start_vial_lock(&ctx), VialHidTaskStart::NoDevice);
+        assert_eq!(app.vial_unlocked, Some(true));
+        assert!(app.main_menu_tab == MainMenuTab::Advanced);
     }
 
     #[test]

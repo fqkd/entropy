@@ -158,6 +158,7 @@ impl EntropyApp {
         ui: &mut egui::Ui,
         center_x: f32,
         layer_name_hovered: bool,
+        application_selector_hovered: bool,
     ) {
         // Hint text below layer name
         let hint_color = if self.dark_mode {
@@ -167,6 +168,37 @@ impl EntropyApp {
         };
         let hint_font = FontId::proportional(12.0);
         let hint_y = ui.max_rect().bottom() - 36.0;
+        if self.editing_layout_visibility {
+            paint_layout_hint_lines(
+                ui,
+                center_x,
+                hint_y,
+                &[
+                    "key_hints.show_hide_keys_mode",
+                    "key_hints.show_hide_keys_click",
+                    "key_hints.show_hide_keys_exit",
+                ],
+                &hint_font,
+                hint_color,
+                self.app_settings.language,
+                false,
+            );
+            return;
+        }
+        if application_selector_hovered {
+            ui.painter().text(
+                egui::pos2(center_x, hint_y),
+                egui::Align2::CENTER_CENTER,
+                super::application_layout_runtime::app_layout_text(
+                    self.app_settings.language,
+                    "Выбрать раскладку или настроить Автослой",
+                    "Select a layout or configure Autolayer",
+                ),
+                hint_font,
+                hint_color,
+            );
+            return;
+        }
         let any_hovered = self.prev_hovered_key.is_some() || self.prev_hovered_encoder;
         let hint_language = self.app_settings.language;
         let tr_hint = |key: &'static str| crate::i18n::tr_catalog(hint_language, key);
@@ -487,6 +519,24 @@ mod tests {
             }
             .keys(false),
             &["key_hints.change_key", CLEAR_KEY]
+        );
+    }
+
+    #[test]
+    fn visibility_edit_hint_mentions_only_keys_in_both_languages() {
+        assert_eq!(
+            crate::i18n::tr_catalog(
+                crate::i18n::Language::English,
+                "key_hints.show_hide_keys_click",
+            ),
+            "Left click a key to show or hide it",
+        );
+        assert_eq!(
+            crate::i18n::tr_catalog(
+                crate::i18n::Language::Russian,
+                "key_hints.show_hide_keys_click",
+            ),
+            "ЛКМ по клавише — показать или скрыть",
         );
     }
 }

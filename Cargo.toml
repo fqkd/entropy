@@ -1,6 +1,6 @@
 [package]
 name = "ergohaven-entropy"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Desktop app for configuring Vial-QMK and Vial-RMK programmable keyboards and input devices"
 authors = ["Ergohaven"]
@@ -81,8 +81,11 @@ tray-icon = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-channel = "2"
+dbus = { version = "0.9", features = ["vendored"] }
 futures-lite = "2"
 hidapi = { version = "2.6", default-features = false, features = ["linux-native-basic-udev"] }
+kdotool = { version = "0.3", default-features = false }
+libc = "0.2"
 x11-dl = "2"
 zbus = "5.16"
 
@@ -101,3 +104,6 @@ strip = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.34", default-features = false }

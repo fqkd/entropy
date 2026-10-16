@@ -70,6 +70,10 @@ impl EntropyApp {
                                 button_size,
                                 true,
                             )
+                            .on_hover_text(crate::i18n::tr_catalog(
+                                lang,
+                                "ui.import_app_settings_tooltip",
+                            ))
                             .clicked()
                             {
                                 self.import_entsettings_dialog();
@@ -80,6 +84,10 @@ impl EntropyApp {
                                 button_size,
                                 true,
                             )
+                            .on_hover_text(crate::i18n::tr_catalog(
+                                lang,
+                                "ui.export_app_settings_tooltip",
+                            ))
                             .clicked()
                             {
                                 self.export_entsettings_dialog();
@@ -849,5 +857,12 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", KERNELS=="0005:E126:*", MODE="0660", GRO
 
         assert!(installer.contains("# Entropy Vial hidraw access v2"));
         assert!(installer.contains(r#"KERNELS==\"0005:E126:*\""#));
+    }
+
+    #[test]
+    fn packaged_udev_rule_is_accepted() {
+        let packaged = include_str!("../../packaging/linux/59-vial.rules");
+
+        assert!(vial_udev_rule_is_current(packaged));
     }
 }

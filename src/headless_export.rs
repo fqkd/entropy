@@ -678,9 +678,311 @@ mod tests {
     /// one combo and one tap dance. `fail` makes chosen requests fail on the
     /// wire the way a timeout or unplug would.
     #[cfg(target_os = "linux")]
+    #[test]
+    fn cold_headless_macropad_exports_profiles_and_pictograms_read_only() {
+        let _storage = crate::app::app_storage::ScopedTempConfig::new();
+        let (mut app, session, recorder) = scripted_export_app(|_| None);
+        let mut profiles = crate::application_layouts::DeviceApplicationLayouts::default();
+        profiles.create_for_application(&crate::application_layouts::DetectedApplication {
+            executable: "vial".into(),
+            display_name: "Vial".into(),
+            ..Default::default()
+        });
+        app.app_settings
+            .application_layouts
+            .insert("vial-0000000000000000-m4cr0pad-v2".into(), profiles);
+        let json = export_entlayout(&mut app, 0, &session, deadline()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["version"], 9);
+        assert_eq!(value["application_layouts"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            value["pictograms"][0]["bitmap"],
+            serde_json::json!(vec![0x55; crate::app::pictograms::PICTOGRAM_BYTES])
+        );
+        assert!(recorder.requests().iter().any(|request| request[0] == 0xc0));
+        assert!(recorder.requests().iter().all(|request| !is_write(request)));
+        assert!(!crate::app::app_storage::app_settings_path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_capability_transport_failure_cannot_export_a_truncated_legacy_document() {
+        let _storage = crate::app::app_storage::ScopedTempConfig::new();
+        let (mut app, session, _) = scripted_export_app(|request| {
+            (request[0] == 0xe6).then(|| "injected capability failure".into())
+        });
+        app.app_settings.application_layouts.insert(
+            "vial-0000000000000000-m4cr0pad-v2".into(),
+            crate::application_layouts::DeviceApplicationLayouts::default(),
+        );
+        assert!(export_entlayout(&mut app, 0, &session, deadline()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    fn click_ordinary_export(app: &mut EntropyApp, path: &Path, ctx: &egui::Context) {
+        let draw = |app: &mut EntropyApp, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100.0, 900.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    app.draw_layout_device_dropdown(
+                        ui,
+                        ctx,
+                        crate::i18n::Language::English,
+                        Some(egui::Rect::from_min_size(
+                            egui::pos2(400.0, 0.0),
+                            egui::vec2(80.0, 30.0),
+                        )),
+                        true,
+                        false,
+                        false,
+                    )
+                },
+            )
+        };
+        let _ = draw(app, vec![]);
+        let output = draw(app, vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Export layout" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("ordinary export menu item");
+        crate::app::file_dialog::set_test_dialog_result(Some(path.to_owned()));
+        for pressed in [true, false] {
+            let _ = draw(
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        assert_eq!(
+            app.pending_file_dialog.as_ref().map(|pending| &pending.0),
+            Some(&crate::app::file_dialog::FileDialogAction::ExportEntlayout)
+        );
+        app.poll_file_dialog(ctx);
+        assert!(app.pending_file_dialog.is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_gui_connect_capability_timeout_never_downgrades_exports() {
+        assert_production_connect_capability_timeout(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_json_connect_capability_timeout_never_downgrades_exports() {
+        assert_production_connect_capability_timeout(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_production_connect_capability_timeout(json_first: bool) {
+        let storage = crate::app::app_storage::ScopedTempConfig::new();
+        let (mut app, _, _) = scripted_export_app(|_| None);
+        app.headless = false;
+        let (hid, recorder) = crate::hid::HidDevice::test_device();
+        scripted_keyboard(&recorder, |request| {
+            (request[0] == 0xe6).then(|| "HID timeout on capability probe".into())
+        });
+        app.test_connect_hid = Some(hid);
+        let mut profiles = crate::application_layouts::DeviceApplicationLayouts::default();
+        profiles.create_for_application(&crate::application_layouts::DetectedApplication {
+            executable: "vial".into(),
+            display_name: "Vial".into(),
+            ..Default::default()
+        });
+        app.app_settings
+            .application_layouts
+            .insert("vial-0000000000000000-m4cr0pad-v2".into(), profiles);
+        crate::app::app_storage::save_app_settings(&app.app_settings);
+        app.app_settings = crate::app::app_storage::load_app_settings();
+        let (mut backup_app, backup_session, _) = scripted_export_app(|_| None);
+        backup_app.app_settings = app.app_settings.clone();
+        let previous = export_entlayout(&mut backup_app, 0, &backup_session, deadline()).unwrap();
+        let ctx = egui::Context::default();
+        app.start_connect(0);
+        let mut connection = ExportConnection::default();
+        let started = Instant::now();
+        while connection.generation.is_none() {
+            assert!(started.elapsed() < Duration::from_secs(20), "connect hung");
+            app.poll_connect(&ctx);
+            connection.step(&mut app, &ctx).unwrap();
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        assert!(
+            app.layout.is_some(),
+            "optional probe must not prevent connection"
+        );
+        assert!(recorder.requests().iter().any(|request| request[0] == 0xe6));
+        assert!(
+            app.application_layout_device_key().is_none(),
+            "failed probe must not grant editor/runtime authority"
+        );
+        let path = storage.path().join("existing.entlayout");
+        std::fs::write(&path, previous.as_bytes()).unwrap();
+        if json_first {
+            assert!(
+                app.entlayout_export_json().unwrap().is_err(),
+                "ordinary JSON export must not emit legacy v7 after capability timeout"
+            );
+        }
+        click_ordinary_export(&mut app, &path, &ctx);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            previous,
+            "ordinary GUI export must not overwrite a full backup after capability timeout"
+        );
+        assert!(
+            app.entlayout_export_json().unwrap().is_err(),
+            "ordinary JSON export must not emit legacy v7 after capability timeout"
+        );
+        scripted_keyboard(&recorder, |_| None);
+        let value: serde_json::Value =
+            serde_json::from_str(&app.entlayout_export_json().unwrap().unwrap()).unwrap();
+        assert_eq!(value["version"], 9);
+        assert_eq!(value["application_layouts"].as_object().unwrap().len(), 2);
+        assert_eq!(
+            value["pictograms"][0]["bitmap"],
+            serde_json::json!(vec![0x55; crate::app::pictograms::PICTOGRAM_BYTES])
+        );
+        app.write_entlayout_export(&path);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(written["version"], 9);
+        assert_eq!(written["application_layouts"], value["application_layouts"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn production_connect_explicit_unsupported_keeps_legacy_export_policy() {
+        // Old firmware echo, explicit unsupported response, incompatible format,
+        // and an ordinary K:04 whose optional Macropad probe must not run.
+        for mode in 0..4 {
+            let storage = crate::app::app_storage::ScopedTempConfig::new();
+            let (mut app, _, _) = scripted_export_app(|_| None);
+            app.headless = false;
+            if mode == 3 {
+                let mut device = app.device_manager.devices()[0].clone();
+                device.name = "K:04".into();
+                device.product_id = 0x0071;
+                app.device_manager.replace_devices(vec![device]);
+            }
+            let (hid, recorder) = crate::hid::HidDevice::test_device();
+            let mut reply = [0; 32];
+            if mode == 0 {
+                reply[..3].copy_from_slice(&[0xe6, 1, 0xa5]);
+            }
+            if mode == 2 {
+                reply[..3].copy_from_slice(&[0xe6, 255, 0x5a]);
+            }
+            scripted_keyboard_with_capability(
+                &recorder,
+                move |request| {
+                    (mode == 3 && request[0] == 0xe6)
+                        .then(|| "unexpected K:04 capability probe".into())
+                },
+                Some(reply),
+            );
+            app.test_connect_hid = Some(hid);
+            let mut profiles = crate::application_layouts::DeviceApplicationLayouts::default();
+            profiles.create_for_application(&crate::application_layouts::DetectedApplication {
+                executable: "vial".into(),
+                display_name: "Vial".into(),
+                ..Default::default()
+            });
+            app.app_settings
+                .application_layouts
+                .insert("vial-0000000000000000-m4cr0pad-v2".into(), profiles.clone());
+            let ctx = egui::Context::default();
+            app.start_connect(0);
+            let mut connection = ExportConnection::default();
+            let started = Instant::now();
+            while connection.generation.is_none() {
+                assert!(started.elapsed() < Duration::from_secs(20), "connect hung");
+                app.poll_connect(&ctx);
+                connection.step(&mut app, &ctx).unwrap();
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            let info = app.device_about_info.as_ref().unwrap();
+            assert!(!info.supports_application_layouts);
+            assert!(!info.application_layout_probe_failed);
+            let json = app.entlayout_export_json().unwrap().unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["version"], 7);
+            assert!(value.get("application_layouts").is_none());
+            let path = storage.path().join("legacy.entlayout");
+            click_ordinary_export(&mut app, &path, &ctx);
+            let written: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(written["version"], 7);
+            assert_eq!(
+                app.app_settings.application_layouts["vial-0000000000000000-m4cr0pad-v2"].layouts,
+                profiles.layouts
+            );
+            assert!(!recorder.requests().iter().any(|request| request[0] == 0xc0));
+            if mode == 3 {
+                assert!(!recorder.requests().iter().any(|request| request[0] == 0xe6));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_pictogram_failures_and_invalid_profiles_never_produce_json() {
+        for opcode in [0xc0, 0xca, 0xcb, 0] {
+            let _storage = crate::app::app_storage::ScopedTempConfig::new();
+            let (mut app, session, recorder) = scripted_export_app(move |request| {
+                (request[0] == opcode && opcode != 0)
+                    .then(|| "injected pictogram read failure".into())
+            });
+            let mut profiles = crate::application_layouts::DeviceApplicationLayouts::default();
+            if opcode == 0 {
+                profiles
+                    .layouts
+                    .get_mut(crate::application_layouts::DEFAULT_APPLICATION_LAYOUT_ID)
+                    .unwrap()
+                    .layers[15][14] = 0x77ff;
+            }
+            app.app_settings
+                .application_layouts
+                .insert("vial-0000000000000000-m4cr0pad-v2".into(), profiles);
+            assert!(export_entlayout(&mut app, 0, &session, deadline()).is_err());
+            assert!(recorder.requests().iter().all(|request| !is_write(request)));
+            assert!(!crate::app::app_storage::app_settings_path().exists());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn scripted_keyboard(
         recorder: &crate::hid::TestHidRecorder,
         fail: impl Fn(&[u8; 32]) -> Option<String> + Send + 'static,
+    ) {
+        scripted_keyboard_with_capability(recorder, fail, None);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scripted_keyboard_with_capability(
+        recorder: &crate::hid::TestHidRecorder,
+        fail: impl Fn(&[u8; 32]) -> Option<String> + Send + 'static,
+        capability_reply: Option<[u8; 32]>,
     ) {
         let definition = serde_json::json!({
             "name": "Export fixture",
@@ -691,12 +993,34 @@ mod tests {
         let mut compressed = Vec::new();
         lzma_rs::xz_compress(&mut definition.as_bytes(), &mut compressed).unwrap();
 
+        let mut library = crate::app::pictograms::PictogramLibrary::blank();
+        library.set(
+            crate::app::pictograms::PictogramKind::Macro,
+            0,
+            &[0x55; crate::app::pictograms::PICTOGRAM_BYTES],
+        );
+        let mut pictograms = std::collections::VecDeque::from(
+            crate::app::pictograms::test_pictogram_read_responses(&library),
+        );
         recorder.respond_by(move |request| {
             if let Some(error) = fail(request) {
                 return Some(Err(error));
             }
+            if matches!(request[0], 0xc0 | 0xca | 0xcb) {
+                return Some(Ok(pictograms
+                    .pop_front()
+                    .expect("unexpected pictogram read")));
+            }
             let mut response = [0u8; 32];
             match request[..3] {
+                [0xe6, version, 0xa5] => {
+                    if let Some(reply) = capability_reply {
+                        return Some(Ok(reply));
+                    }
+                    response[0] = 0xe6;
+                    response[1] = version;
+                    response[2] = 0x5a;
+                }
                 [0x01, ..] => response[2] = 9,
                 [0xFE, 0x00, _] => response[0] = 6,
                 [0xFE, 0x05, _] => {
@@ -772,6 +1096,12 @@ mod tests {
                 matches!(request[1], 0x04 | 0x06 | 0x07 | 0x08 | 0x0B | 0x0C)
                     || (request[1] == 0x0D && request[2] != 0 && request[2].is_multiple_of(2))
             }
+            0xc0 | 0xc1 | 0xca | 0xcb => false,
+            0xe6 => {
+                !(request[1] == crate::application_layouts::APPLICATION_LAYOUT_PROTOCOL_VERSION
+                    && request[2] == 0xa5
+                    && request[3..].iter().all(|byte| *byte == 0))
+            }
             0xA0..=0xFD => true,
             _ => false,
         }
@@ -806,6 +1136,15 @@ mod tests {
         assert_eq!(
             bundle["data"]["keymap"],
             serde_json::json!([[4, 5], [6, 7]])
+        );
+        // An explicit empty preference can clear prior hidden positions on import.
+        assert_eq!(
+            bundle["data"]["layout_element_visibility"]["hidden_keys"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            bundle["data"]["layout_element_visibility"]["hidden_encoders"],
+            serde_json::json!([])
         );
         assert_eq!(
             bundle["data"]["combos"]["entries"]

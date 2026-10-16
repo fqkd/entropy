@@ -3,7 +3,7 @@
 Modern app for programmable keyboards and input devices, built by Ergohaven.
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Latest release](https://img.shields.io/badge/latest-v0.4.0-lightgrey.svg)](https://github.com/ergohaven/entropy/releases)
+[![Latest release](https://img.shields.io/badge/latest-v0.5.0-lightgrey.svg)](https://github.com/ergohaven/entropy/releases)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey.svg)](#platforms)
 [![Firmware](https://img.shields.io/badge/firmware-Vial--QMK%20%7C%20Vial--RMK-lightgrey.svg)](#compatibility)
 
@@ -63,10 +63,10 @@ unsigned and not notarized for now.
 Release builds are published on the
 [GitHub Releases](https://github.com/ergohaven/entropy/releases) page:
 
-- `entropy-v0.4.0-x86_64.AppImage`
-- `entropy-v0.4.0-windows-x86_64.exe`
-- `entropy-v0.4.0-macos-arm64.dmg`
-- `entropy-v0.4.0-macos-x86_64.dmg`
+- `entropy-v0.5.0-x86_64.AppImage`
+- `entropy-v0.5.0-windows-x86_64.exe`
+- `entropy-v0.5.0-macos-arm64.dmg`
+- `entropy-v0.5.0-macos-x86_64.dmg`
 
 Stable tags such as `v0.4.0` publish a regular GitHub release and mark it as
 latest. Tags with a suffix, such as `v0.4.0-rc.1`, publish the same artifacts as
@@ -297,6 +297,15 @@ sudo apt-get install \
   libxkbcommon-dev \
   libssl-dev \
   libgtk-3-dev
+```
+
+Linux packages — `.deb`, `.rpm`, Arch `.pkg.tar.zst` and the AppImage — are built
+with [go-task](https://taskfile.dev). See [BUILD.md](BUILD.md) for the full
+reference:
+
+```sh
+task prepare
+task linux:all
 ```
 
 Build a macOS app bundle and DMG on macOS:

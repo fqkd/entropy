@@ -1,15 +1,21 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod action_icons;
 mod app;
+#[cfg(not(target_arch = "wasm32"))]
+mod app_discovery;
 pub(crate) mod app_icon;
 #[cfg(target_os = "windows")]
 mod codex_macropad;
+mod application_layouts;
 mod device;
 mod diagnostics;
 mod firmware;
+mod firmware_builtin_icons;
 #[cfg(not(target_arch = "wasm32"))]
 mod hid;
 mod i18n;
+mod integration_icons;
 mod keyboard;
 mod keycode;
 mod keycode_picker;
